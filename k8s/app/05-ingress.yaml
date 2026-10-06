@@ -1,0 +1,27 @@
+# Os três serviços dividem um único ALB: o `group.name` junta os Ingresses no
+# mesmo balanceador (um ALB por serviço triplicaria o custo). O OS Service fica
+# com as rotas sem prefixo e este serviço com /billing. O Ingress do OS Service
+# precisa ter o mesmo `group.name` (passo 2.4 do plano de ação).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: oficina-billing
+  namespace: oficina-billing
+  annotations:
+    alb.ingress.kubernetes.io/group.name: oficina
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/healthcheck-path: /billing/health
+    alb.ingress.kubernetes.io/success-codes: "200"
+spec:
+  ingressClassName: alb
+  rules:
+    - http:
+        paths:
+          - path: /billing
+            pathType: Prefix
+            backend:
+              service:
+                name: oficina-billing
+                port:
+                  number: 3000
