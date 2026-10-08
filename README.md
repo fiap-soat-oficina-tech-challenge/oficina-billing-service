@@ -2,7 +2,7 @@
 
 Orçamentos, aprovação e pagamentos com o Mercado Pago.
 
-Microsserviço do Tech Challenge da Fase 4 (FIAP SOAT): a oficina mecânica dividida em OS Service, Billing Service e Execution Service, com a Saga orquestrada pelo OS Service. Os contratos de mensagens e rotas entre os serviços estão em [docs/contratos.md](https://github.com/LucasValada/tech-challenge-fiap/blob/docs/contratos-fase4/docs/contratos.md).
+Microsserviço do Tech Challenge da Fase 4 (FIAP SOAT): a oficina mecânica dividida em OS Service, Billing Service e Execution Service, com a Saga orquestrada pelo OS Service. Os contratos de mensagens e rotas entre os serviços estão em [docs/contratos.md](https://github.com/LucasValada/tech-challenge-fiap/blob/develop/docs/contratos.md).
 
 ## Responsabilidades
 
@@ -48,3 +48,5 @@ k8s/            namespace, ConfigMap, Deployment, Service, HPA, Ingress e PDB
 ## Deploy
 
 Os manifestos ficam em `k8s/`. O Ingress compartilha o ALB dos três serviços (`group.name: oficina`) e encaminha `/billing` para este serviço. O pipeline de deploy no EKS entra na etapa de integração do plano de ação.
+
+A infraestrutura AWS do serviço (fila, banco, repositório de imagens e permissões) está em [`terraform/`](terraform/README.md).
