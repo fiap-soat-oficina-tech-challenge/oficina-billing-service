@@ -9,6 +9,8 @@ metadata:
   namespace: oficina-billing
   annotations:
     alb.ingress.kubernetes.io/group.name: oficina
+    # Avaliado antes da regra genérica `/` do OS Service, que usa group.order 100.
+    alb.ingress.kubernetes.io/group.order: "10"
     alb.ingress.kubernetes.io/scheme: internet-facing
     alb.ingress.kubernetes.io/target-type: ip
     alb.ingress.kubernetes.io/healthcheck-path: /billing/health
