@@ -4,6 +4,12 @@ Orçamentos, aprovação e pagamentos com o Mercado Pago.
 
 Microsserviço do Tech Challenge da Fase 4 (FIAP SOAT). A oficina mecânica foi dividida em três serviços: OS Service, Billing Service e Execution Service. A Saga é orquestrada pelo OS Service. Os contratos de mensagens e rotas entre os serviços estão em [docs/contratos.md](https://github.com/LucasValada/tech-challenge-fiap/blob/develop/docs/contratos.md), e este serviço segue esse documento à risca.
 
+| Serviço | Repositório | Banco |
+|---|---|---|
+| OS Service (orquestrador da Saga) | [LucasValada/tech-challenge-fiap](https://github.com/LucasValada/tech-challenge-fiap) | PostgreSQL |
+| Billing Service | [oficina-billing-service](https://github.com/fiap-soat-oficina-tech-challenge/oficina-billing-service) | PostgreSQL |
+| Execution Service | [oficina-execution-service](https://github.com/fiap-soat-oficina-tech-challenge/oficina-execution-service) | DynamoDB |
+
 ## Sumário
 
 - [Responsabilidades](#responsabilidades)
@@ -21,6 +27,7 @@ Microsserviço do Tech Challenge da Fase 4 (FIAP SOAT). A oficina mecânica foi 
 - [Testes e cobertura](#testes-e-cobertura)
 - [Variáveis de ambiente](#variáveis-de-ambiente)
 - [Deploy](#deploy)
+- [Fluxo de trabalho](#fluxo-de-trabalho)
 - [Decisões e limites](#decisões-e-limites)
 
 ## Responsabilidades
@@ -220,6 +227,15 @@ Schema em [`prisma/schema.prisma`](prisma/schema.prisma); migrations em `prisma/
 | `LinhaOrcamento` | serviços e itens do orçamento (`tipo`), com nome, preço unitário, quantidade e subtotal da época, na ordem em que chegaram | índice por `orcamentoId` |
 | `Pagamento` | pagamentos informados pelo Mercado Pago: status, valor, `status_detail`, datas e motivo do estorno | `id` = id do Mercado Pago; índices por `osId` e `orcamentoId` |
 
+**Por que PostgreSQL.** Orçamento e pagamento são dinheiro, e o serviço precisa de:
+
+- transação de verdade: o orçamento, as linhas e a publicação da resposta se confirmam juntos;
+- chaves únicas que garantem a idempotência (um orçamento por OS, um registro por pagamento);
+- gravação condicional pelo status;
+- valores decimais exatos.
+
+O banco relacional dá tudo isso, e é o mesmo motor e a mesma ferramenta (Prisma) do OS Service. O NoSQL do projeto fica no Execution, onde os dados são documentos simples por chave.
+
 Valores em `Decimal(10, 2)`, como no OS Service. No código, as contas de dinheiro são feitas em centavos inteiros ([`domain/dinheiro.ts`](src/modules/orcamento/domain/dinheiro.ts)) para evitar erro de ponto flutuante. O `GerarOrcamento` só é aceito se cada subtotal for preço × quantidade e os totais fecharem com a soma das linhas.
 
 ## Arquitetura do código
@@ -338,6 +354,13 @@ O CI (`.github/workflows/ci.yml`) roda lint, testes com cobertura e build em tod
 Os manifestos ficam em `k8s/`, no namespace `oficina-billing`. A ordem de aplicação acompanha a numeração dos arquivos: ConfigMap, Job de migração (`prisma migrate deploy`, que precisa terminar antes), Deployment, Service, HPA, Ingress e PDB. O Ingress compartilha o ALB dos três serviços (`group.name: oficina`) e encaminha `/billing` para este serviço. Os segredos chegam pelo Secret `billing-secret`, montado a partir do SSM. A lista está em [`terraform/README.md`](terraform/README.md). O pipeline de deploy no EKS entra na etapa de integração do plano de ação.
 
 A infraestrutura AWS do serviço (fila, banco, repositório de imagens e permissões) está em [`terraform/`](terraform/README.md).
+
+## Fluxo de trabalho
+
+- Branch a partir da `develop` → PR para a `develop` → PR da `develop` para a `main`.
+- A `main` é protegida: exige PR com uma aprovação, o check `Build & Test` verde e a branch atualizada, e vale também para administradores.
+- Mudança de contrato (mensagem, fila ou rota usada por outro serviço) começa por um PR em `docs/contratos.md` no OS Service, e só depois é feita nos serviços.
+- Mudança na base comum (`src/common/`, `src/core/`, `auth`, `health`) é feita nos três serviços.
 
 ## Decisões e limites
 
