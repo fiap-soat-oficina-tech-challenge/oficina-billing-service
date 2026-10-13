@@ -61,6 +61,23 @@ spec:
                 secretKeyRef:
                   name: billing-secret
                   key: WEBHOOK_ORCAMENTO_TOKEN
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: billing-secret
+                  key: DATABASE_URL
+            - name: MERCADO_PAGO_ACCESS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: billing-secret
+                  key: MERCADO_PAGO_ACCESS_TOKEN
+            # Opcional: sem ele, nenhum e-mail é enviado e o serviço sobe mesmo assim.
+            - name: MAIL_LAMBDA_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: billing-secret
+                  key: MAIL_LAMBDA_TOKEN
+                  optional: true
             # Opcional: sem a chave o agente fica desligado e o serviço sobe mesmo assim.
             - name: NEW_RELIC_LICENSE_KEY
               valueFrom:
@@ -75,9 +92,9 @@ spec:
             limits:
               cpu: "500m"
               memory: "512Mi"
-          # Enquanto o serviço não tem dependências, readiness e liveness usam o
-          # mesmo endpoint; a readiness passa a checar banco e filas quando eles
-          # entrarem.
+          # Liveness rasa (o processo responde) e readiness com o banco: um pod
+          # sem acesso ao PostgreSQL sai do Service, mas não é reiniciado —
+          # reiniciar não resolve rede ou credencial.
           startupProbe:
             httpGet:
               path: /billing/health
@@ -87,7 +104,7 @@ spec:
             failureThreshold: 24
           readinessProbe:
             httpGet:
-              path: /billing/health
+              path: /billing/health/ready
               port: 3000
             periodSeconds: 10
             timeoutSeconds: 3

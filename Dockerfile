@@ -2,11 +2,15 @@ FROM node:24-alpine AS builder
 
 WORKDIR /app
 
-COPY package*.json ./
+COPY package*.json prisma.config.ts ./
+COPY prisma ./prisma
 
 # npm ci para build determinístico; --ignore-scripts bloqueia scripts de
 # instalação de dependências de terceiros (hardening de supply chain).
 RUN npm ci --ignore-scripts
+
+# Cliente do Prisma gerado a partir do schema (src/generated, fora do git).
+RUN npx prisma generate
 
 COPY . .
 RUN npm run build
@@ -19,6 +23,16 @@ COPY package*.json ./
 RUN npm ci --omit=dev --ignore-scripts
 
 COPY --from=builder /app/dist ./dist
+
+# Schema, migrations e configuração do Prisma: o Job de migração do Kubernetes
+# (k8s/app/02-migration-job.yaml) usa esta mesma imagem para rodar
+# `prisma migrate deploy` antes do Deployment.
+COPY --from=builder /app/prisma ./prisma
+COPY --from=builder /app/prisma.config.ts ./prisma.config.ts
+
+# Bundle de CAs do RDS: a conexão com o banco valida o certificado
+# (PrismaService), como no OS Service.
+COPY certs ./certs
 
 # New Relic: só configuração não sensível. A license key chega em runtime
 # (Secret no Kubernetes, .env no docker compose). O agente nasce desligado e só

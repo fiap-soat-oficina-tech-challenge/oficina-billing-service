@@ -1,8 +1,66 @@
-# Sobe o serviço localmente: `docker compose up --build`.
-# Swagger em http://localhost:3001/billing/api e saúde em http://localhost:3001/billing/health.
+# Sobe o serviço com as dependências simuladas:
+#   docker compose up --build
+#
+# - postgres:      o banco do Billing (as migrations rodam na subida do serviço)
+# - localstack:    SQS com as filas de terraform/sqs.tf
+# - mercado-pago:  simulador da API do Mercado Pago (mercado-pago-simulador/)
+#
+# Swagger em http://localhost:3001/billing/api e saúde em
+# http://localhost:3001/billing/health/ready.
 services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: billing
+      POSTGRES_PASSWORD: billing
+      POSTGRES_DB: billing
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "billing"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  localstack:
+    # Versão fixa: imagens mais novas do LocalStack podem exigir token de conta.
+    image: localstack/localstack:4.0
+    ports:
+      - "4566:4566"
+    environment:
+      SERVICES: sqs
+    volumes:
+      - ./localstack/init:/etc/localstack/init/ready.d:ro
+    healthcheck:
+      test: ["CMD", "awslocal", "sqs", "get-queue-url", "--queue-name", "oficina-os-saga-replies"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  mercado-pago:
+    image: wiremock/wiremock:3.9.1
+    ports:
+      - "8089:8080"
+    volumes:
+      - ./mercado-pago-simulador/mappings:/home/wiremock/mappings:ro
+
   billing:
     build: .
     env_file: .env
+    environment:
+      DATABASE_URL: postgresql://billing:billing@postgres:5432/billing?schema=public
+      AWS_ENDPOINT_URL: http://localstack:4566
+      BILLING_COMMANDS_QUEUE_URL: http://localstack:4566/000000000000/oficina-billing-commands
+      SAGA_REPLIES_QUEUE_URL: http://localstack:4566/000000000000/oficina-os-saga-replies
+      MERCADO_PAGO_API_URL: http://mercado-pago:8080
+    # Aplica as migrations antes de subir, como o Job de migração faz no cluster.
+    command: ["sh", "-c", "npx prisma migrate deploy && exec node -r newrelic dist/main.js"]
     ports:
       - "3001:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+      mercado-pago:
+        condition: service_started

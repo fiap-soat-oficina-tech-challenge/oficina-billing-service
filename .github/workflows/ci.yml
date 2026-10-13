@@ -28,6 +28,10 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # O cliente do Prisma é gerado do schema (src/generated fica fora do git).
+      - name: Generate Prisma client
+        run: npx prisma generate
+
       - name: Lint
         run: npm run lint:check
 

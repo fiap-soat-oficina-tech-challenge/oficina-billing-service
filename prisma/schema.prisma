@@ -1,0 +1,120 @@
+// Banco próprio do Billing Service (PostgreSQL). Nenhum outro serviço lê estas
+// tabelas: o que vem do OS Service (cliente e linhas da OS) é a cópia recebida
+// no comando GerarOrcamento.
+
+generator client {
+  provider     = "prisma-client"
+  output       = "../src/generated/prisma"
+  moduleFormat = "cjs"
+  // Imports sem extensão, como o `nest build` (CommonJS) espera. Sem isto, o
+  // gerador escolhe a extensão pelo tsconfig, que não existe no passo do
+  // Dockerfile em que o cliente é gerado.
+  importFileExtension = ""
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum StatusOrcamento {
+  AGUARDANDO_APROVACAO
+  APROVADO
+  RECUSADO
+  PAGO
+  CANCELADO
+}
+
+enum OrigemDecisao {
+  CLIENTE
+  SISTEMA_EXTERNO
+}
+
+enum TipoLinhaOrcamento {
+  SERVICO
+  ITEM
+}
+
+enum StatusPagamento {
+  APROVADO
+  RECUSADO
+  ESTORNADO
+}
+
+/// Um orçamento por OS (osId único): é a chave natural que torna o comando
+/// GerarOrcamento idempotente.
+model Orcamento {
+  id            String          @id @db.Uuid
+  osId          String          @unique
+  codigoOS      String          @unique
+  /// Fluxo da OS: vai em toda resposta publicada a partir deste orçamento.
+  correlationId String
+  clienteId     String
+  clienteNome   String
+  clienteEmail  String?
+  valorServicos Decimal         @db.Decimal(10, 2)
+  valorPecas    Decimal         @db.Decimal(10, 2)
+  valorTotal    Decimal         @db.Decimal(10, 2)
+  status        StatusOrcamento
+
+  origemDecisao      OrigemDecisao?
+  motivoRecusa       String?
+  motivoCancelamento String?
+
+  /// Cobrança no Mercado Pago (Checkout Pro), criada na aprovação.
+  preferenciaId String?
+  linkPagamento String?
+  linkExpiraEm  DateTime?
+
+  criadoEm     DateTime
+  atualizadoEm DateTime
+  decididoEm   DateTime?
+  pagoEm       DateTime?
+  canceladoEm  DateTime?
+
+  linhas     LinhaOrcamento[]
+  pagamentos Pagamento[]
+
+  @@index([clienteId])
+}
+
+/// Serviços e itens do orçamento: snapshot das linhas da OS no momento do
+/// diagnóstico, com nome e preço daquele momento.
+model LinhaOrcamento {
+  id            String             @id @default(uuid()) @db.Uuid
+  orcamentoId   String             @db.Uuid
+  tipo          TipoLinhaOrcamento
+  /// servicoId ou itemEstoqueId no OS Service (só para rastreio).
+  referenciaId  String
+  nome          String
+  precoUnitario Decimal            @db.Decimal(10, 2)
+  quantidade    Int
+  subtotal      Decimal            @db.Decimal(10, 2)
+  /// Mantém a ordem em que as linhas chegaram no comando.
+  posicao       Int
+
+  orcamento Orcamento @relation(fields: [orcamentoId], references: [id], onDelete: Cascade)
+
+  @@index([orcamentoId])
+}
+
+/// Pagamento no Mercado Pago. O id é o do próprio Mercado Pago: o webhook
+/// repete avisos, e a chave primária garante que cada pagamento é tratado uma
+/// vez só.
+model Pagamento {
+  id            String          @id
+  orcamentoId   String          @db.Uuid
+  osId          String
+  status        StatusPagamento
+  valor         Decimal         @db.Decimal(10, 2)
+  /// status_detail do Mercado Pago (ex.: accredited, cc_rejected_other_reason).
+  detalhe       String?
+  registradoEm  DateTime
+  pagoEm        DateTime?
+  estornadoEm   DateTime?
+  motivoEstorno String?
+
+  orcamento Orcamento @relation(fields: [orcamentoId], references: [id], onDelete: Restrict)
+
+  @@index([osId])
+  @@index([orcamentoId])
+}

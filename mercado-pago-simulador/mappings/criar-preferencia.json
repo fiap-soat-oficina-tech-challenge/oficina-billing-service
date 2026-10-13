@@ -1,0 +1,13 @@
+{
+  "request": { "method": "POST", "urlPath": "/checkout/preferences" },
+  "response": {
+    "status": 201,
+    "headers": { "Content-Type": "application/json" },
+    "jsonBody": {
+      "id": "pref-{{jsonPath request.body '$.external_reference'}}",
+      "init_point": "http://localhost:8089/checkout/pref-{{jsonPath request.body '$.external_reference'}}",
+      "sandbox_init_point": "http://localhost:8089/sandbox/checkout/pref-{{jsonPath request.body '$.external_reference'}}"
+    },
+    "transformers": ["response-template"]
+  }
+}

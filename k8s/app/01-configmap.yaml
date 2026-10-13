@@ -1,5 +1,7 @@
-# Configuração não sensível. Segredos (JWT_SECRET, license key do New Relic)
-# chegam pelo Secret `billing-secret`, criado pelo CD a partir do SSM.
+# Configuração não sensível. Segredos chegam pelo Secret `billing-secret`,
+# criado pelo CD a partir do SSM: JWT_SECRET, WEBHOOK_ORCAMENTO_TOKEN,
+# DATABASE_URL, MERCADO_PAGO_ACCESS_TOKEN, MAIL_LAMBDA_TOKEN e a license key do
+# New Relic.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -9,6 +11,21 @@ data:
   NODE_ENV: "production"
   APPLICATION_PORT: "3000"
   LOG_LEVEL: "info"
+
+  # Mensageria (terraform/sqs.tf). As credenciais da AWS vêm da role dos nós do
+  # EKS, não de variável.
+  AWS_REGION: "us-east-1"
+  BILLING_COMMANDS_QUEUE_URL: "https://sqs.us-east-1.amazonaws.com/008363475762/oficina-billing-commands"
+  SAGA_REPLIES_QUEUE_URL: "https://sqs.us-east-1.amazonaws.com/008363475762/oficina-os-saga-replies"
+
+  # Mercado Pago (Checkout Pro) com credenciais de teste: o link devolvido ao
+  # cliente é o do sandbox. O aviso de pagamento chega pelo API Gateway da
+  # plataforma (tc3-auth-lambda), que encaminha /billing ao ALB. O host do API
+  # Gateway muda se ele for recriado — conferir na etapa de integração, junto
+  # com o MAIL_LAMBDA_URL (mesmo host do OS Service).
+  MERCADO_PAGO_SANDBOX: "true"
+  MERCADO_PAGO_NOTIFICATION_URL: "https://8hkalepe37.execute-api.us-east-1.amazonaws.com/billing/webhooks/mercado-pago"
+  MAIL_LAMBDA_URL: "https://8hkalepe37.execute-api.us-east-1.amazonaws.com/mail"
 
   # Observabilidade — mesmos valores do OS Service, mudando só o nome do app.
   NEW_RELIC_ENABLED: "true"

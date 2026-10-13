@@ -1,0 +1,47 @@
+# Job one-shot que aplica as migrations do Prisma antes do Deployment, como no
+# OS Service. O CD substitui IMAGE_PLACEHOLDER pela imagem do ECR (a mesma do
+# Deployment, que já traz prisma/ e o CLI), aplica, espera o Job terminar e só
+# então aplica o Deployment.
+#
+# Roda de dentro do cluster porque o RDS fica em subnet privada (inalcançável de
+# fora da VPC).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: billing-db-migration
+  namespace: oficina-billing
+  labels:
+    app.kubernetes.io/component: migration
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      annotations:
+        # A saída do `prisma migrate` é texto puro, não JSON: no New Relic
+        # viraria linhas sem atributo algum. O CD já imprime este log no
+        # próprio pipeline (`kubectl logs job/...`).
+        fluentbit.io/exclude: "true"
+    spec:
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      automountServiceAccountToken: false
+      containers:
+        - name: migrate
+          image: IMAGE_PLACEHOLDER
+          command: ["npx", "prisma", "migrate", "deploy"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: billing-secret
+                  key: DATABASE_URL

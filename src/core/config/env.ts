@@ -20,4 +20,17 @@ export function validateEnv(): void {
   must('APPLICATION_PORT');
   must('JWT_SECRET');
   must('WEBHOOK_ORCAMENTO_TOKEN');
+
+  // Banco próprio (terraform/rds.tf) e mensageria (terraform/sqs.tf): a fila
+  // consumida e a fila de respostas da Saga.
+  must('DATABASE_URL');
+  must('AWS_REGION');
+  must('BILLING_COMMANDS_QUEUE_URL');
+  must('SAGA_REPLIES_QUEUE_URL');
+
+  // Mercado Pago. MERCADO_PAGO_API_URL (padrão: a API real) só muda nos testes,
+  // que usam um simulador. MERCADO_PAGO_NOTIFICATION_URL e o e-mail
+  // (MAIL_LAMBDA_URL e MAIL_LAMBDA_TOKEN) são opcionais: sem eles, o serviço
+  // funciona, mas o Mercado Pago não avisa os pagamentos e nenhum e-mail sai.
+  must('MERCADO_PAGO_ACCESS_TOKEN');
 }

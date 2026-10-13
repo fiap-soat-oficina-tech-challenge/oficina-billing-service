@@ -14,3 +14,7 @@ coverage
 k8s
 infra
 .github
+localstack
+mercado-pago-simulador
+terraform
+src/generated
