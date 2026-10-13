@@ -9,3 +9,4 @@ coverage/
 .terraform/
 *.tfstate
 *.tfstate.*
+/src/generated/prisma
