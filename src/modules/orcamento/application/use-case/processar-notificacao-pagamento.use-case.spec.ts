@@ -98,7 +98,7 @@ describe('ProcessarNotificacaoPagamentoUseCase', () => {
     expect((await pagamentos.buscarPorId('1234567890'))?.status).toBe(
       'RECUSADO',
     );
-    // O orçamento só é cancelado quando o orquestrador manda CancelarOrcamento.
+    // A recusa não muda o orçamento: o link continua valendo para nova tentativa.
     expect((await orcamentos.buscarPorId(ORCAMENTO_ID))?.status).toBe(
       'APROVADO',
     );
@@ -106,6 +106,40 @@ describe('ProcessarNotificacaoPagamentoUseCase', () => {
       tipo: 'PagamentoRecusado',
       payload: { detalhe: 'cc_rejected_other_reason' },
     });
+  });
+
+  it('depois de uma recusa, o cliente tenta de novo pelo mesmo link e o pagamento é confirmado', async () => {
+    const { useCase, gateway, orcamentos, pagamentos, publicador } = montar();
+    gateway.pagamentos.set(
+      '111',
+      pagamentoNoGateway({
+        id: '111',
+        situacao: 'RECUSADO',
+        statusOriginal: 'rejected',
+        detalhe: 'cc_rejected_insufficient_amount',
+        pagoEm: null,
+      }),
+    );
+    gateway.pagamentos.set('222', pagamentoNoGateway({ id: '222' }));
+
+    await expect(useCase.execute('111', AGORA)).resolves.toBe(
+      'PAGAMENTO_RECUSADO',
+    );
+    await expect(useCase.execute('222', AGORA)).resolves.toBe(
+      'PAGAMENTO_CONFIRMADO',
+    );
+
+    expect((await orcamentos.buscarPorId(ORCAMENTO_ID))?.status).toBe('PAGO');
+    expect(
+      (await pagamentos.listarPorOs(OS_ID)).map((p) => [p.id, p.status]),
+    ).toEqual([
+      ['111', 'RECUSADO'],
+      ['222', 'APROVADO'],
+    ]);
+    expect(publicador.tipos()).toEqual([
+      'PagamentoRecusado',
+      'PagamentoConfirmado',
+    ]);
   });
 
   it('recusa depois do cancelamento só fica registrada, sem avisar a Saga', async () => {

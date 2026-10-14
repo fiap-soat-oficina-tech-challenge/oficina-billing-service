@@ -19,9 +19,10 @@ import { EstornoDePagamento } from '../shared/estorno-de-pagamento';
 import { lerMotivo } from '../shared/ler-motivo';
 
 /**
- * Consome `CancelarOrcamento`, a compensação enviada pelo orquestrador quando a
- * OS é cancelada esperando o cliente (pagamento recusado ou cancelamento pelo
- * funcionário). O que fazer depende de onde o orçamento parou:
+ * Consome `CancelarOrcamento`, a compensação enviada pelo orquestrador quando o
+ * funcionário cancela uma OS que espera o cliente (aprovação ou pagamento): o
+ * cliente desistiu, o link expirou ou os pagamentos foram recusados e ele não
+ * tentou de novo. O que fazer depende de onde o orçamento parou:
  *
  * | Status do orçamento      | O que acontece                                      |
  * |--------------------------|-----------------------------------------------------|
@@ -30,8 +31,8 @@ import { lerMotivo } from '../shared/ler-motivo';
  * | `PAGO`                   | estorna, cancela e responde `PagamentoEstornado`    |
  * | `RECUSADO` / `CANCELADO` | nada: já está encerrado (comando repetido)          |
  *
- * O link é expirado porque, no Checkout Pro, o cliente poderia tentar pagar de
- * novo com outro cartão. Se o Mercado Pago falhar, a mensagem volta para a fila
+ * O link é expirado porque, no Checkout Pro, ele continua aceitando pagamento
+ * (inclusive depois de uma recusa). Se o Mercado Pago falhar, a mensagem volta para a fila
  * e o cancelamento é repetido; depois de 5 tentativas vai para a DLQ, então a
  * compensação nunca se perde.
  */

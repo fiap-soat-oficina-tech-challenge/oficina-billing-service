@@ -44,8 +44,10 @@ export type ResultadoNotificacao =
  *   como PAGO e responde `PagamentoConfirmado` (a OS vai para execução).
  * - Aprovado, com o orçamento cancelado ou já pago: estorna e responde
  *   `PagamentoEstornado` — nenhuma OS cancelada fica com dinheiro retido.
- * - Recusado: registra e, se o orçamento aguardava pagamento, responde
- *   `PagamentoRecusado` (o orquestrador compensa e cancela a OS).
+ * - Recusado: registra a tentativa e, se o orçamento aguardava pagamento,
+ *   responde `PagamentoRecusado`, que é informativo: o orçamento continua
+ *   APROVADO, o link continua valendo e o cliente pode tentar de novo. A OS só
+ *   avança quando um pagamento é aprovado.
  * - Pendente, em análise e afins: nada a fazer; o Mercado Pago avisa de novo.
  *
  * O Mercado Pago repete avisos: um pagamento já registrado não é tratado de
@@ -173,8 +175,10 @@ export class ProcessarNotificacaoPagamentoUseCase {
   }
 
   /**
-   * Registra a recusa. Só avisa o orquestrador se o orçamento ainda aguardava
-   * pagamento; uma recusa depois do cancelamento fica apenas no histórico.
+   * Registra a recusa sem mudar o orçamento: o cliente pode pagar de novo pelo
+   * mesmo link. Só avisa o orquestrador (para o histórico da OS) se o orçamento
+   * ainda aguardava pagamento; uma recusa depois do cancelamento fica apenas
+   * registrada aqui.
    */
   private async registrarRecusa(
     pagamento: PagamentoNoGateway,
