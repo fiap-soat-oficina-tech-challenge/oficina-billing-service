@@ -179,7 +179,7 @@ confere "recusa → OrcamentoRecusado com o motivo" "$TIPO $(echo "$PAYLOAD" | c
   "OrcamentoRecusado Valor acima do esperado"
 confere "orçamento recusado" "$(orcamento_da_os "$OS2" status)" RECUSADO
 
-echo "== 3. Sistema externo aprova, pagamento é recusado e a Saga cancela"
+echo "== 3. Sistema externo aprova, o pagamento é recusado e o cliente paga na segunda tentativa"
 OS3=$(uuid); C3="OS-2026-$(python3 -c 'import random;print(random.randint(100000,999999))')"
 comando GerarOrcamento "$OS3" "$(payload_orcamento "$C3")"
 resposta >/dev/null
@@ -194,25 +194,33 @@ confere "→ OrcamentoAprovado (origem SISTEMA_EXTERNO)" "$TIPO $(echo "$PAYLOAD
 pagamento_no_mp 9301 rejected cc_rejected_other_reason "$ORC3"
 confere "aviso do Mercado Pago (recusado)" "$(aviso_mp 9301)" PAGAMENTO_RECUSADO
 R=$(resposta); IFS='|' read -r TIPO _ _ PAYLOAD <<<"$R"
-confere "→ PagamentoRecusado com o status_detail" "$TIPO $(echo "$PAYLOAD" | campo "['detalhe']")" \
+confere "→ PagamentoRecusado com o status_detail (informativo)" "$TIPO $(echo "$PAYLOAD" | campo "['detalhe']")" \
   "PagamentoRecusado cc_rejected_other_reason"
-comando CancelarOrcamento "$OS3" '{"motivo": "PAGAMENTO_RECUSADO"}'
-sleep 3
-confere "CancelarOrcamento cancela o orçamento" "$(orcamento_da_os "$OS3" status)" CANCELADO
-confere "e expira o link no Mercado Pago" \
-  "$(curl -s "$MP/__admin/requests" | python3 -c "import json,sys;print(any(x['request']['method']=='PUT' and x['request']['url']=='/checkout/preferences/pref-$ORC3' for x in json.load(sys.stdin)['requests']))")" \
-  True
-sem_resposta "cancelamento sem pagamento não gera resposta"
+confere "o orçamento continua aprovado, com o mesmo link" "$(orcamento_da_os "$OS3" status)" APROVADO
+pagamento_no_mp 9302 approved accredited "$ORC3"
+confere "nova tentativa aprovada" "$(aviso_mp 9302)" PAGAMENTO_CONFIRMADO
+R=$(resposta); IFS='|' read -r TIPO _ _ PAYLOAD <<<"$R"
+confere "→ PagamentoConfirmado com o id da segunda tentativa" "$TIPO $(echo "$PAYLOAD" | campo "['pagamentoId']")" \
+  "PagamentoConfirmado 9302"
+confere "orçamento PAGO" "$(orcamento_da_os "$OS3" status)" PAGO
+confere "as duas tentativas ficam registradas" \
+  "$(curl -s "$API/pagamentos?osId=$OS3" -H "Authorization: Bearer $TOKEN_FUNCIONARIO" | python3 -c 'import json,sys;print(" ".join(p["status"] for p in json.load(sys.stdin)))')" \
+  "RECUSADO APROVADO"
 
-echo "== 4. Pagamento aprovado depois do cancelamento é estornado"
+echo "== 4. Funcionário cancela a OS esperando pagamento; pagamento atrasado é estornado"
 OS4=$(uuid)
 comando GerarOrcamento "$OS4" "$(payload_orcamento "OS-2026-$(python3 -c 'import random;print(random.randint(100000,999999))')")"
 resposta >/dev/null
 ORC4=$(orcamento_da_os "$OS4" id)
 curl -s -X POST "$API/orcamentos/$ORC4/aprovar" -H "Authorization: Bearer $TOKEN_CLIENTE" >/dev/null
 resposta >/dev/null
-comando CancelarOrcamento "$OS4" '{"motivo": "Cancelada pelo funcionário"}'
+comando CancelarOrcamento "$OS4" '{"motivo": "Cliente desistiu do pagamento"}'
 sleep 3
+confere "CancelarOrcamento cancela o orçamento" "$(orcamento_da_os "$OS4" status)" CANCELADO
+confere "e expira o link no Mercado Pago" \
+  "$(curl -s "$MP/__admin/requests" | python3 -c "import json,sys;print(any(x['request']['method']=='PUT' and x['request']['url']=='/checkout/preferences/pref-$ORC4' for x in json.load(sys.stdin)['requests']))")" \
+  True
+sem_resposta "cancelamento sem pagamento não gera resposta"
 pagamento_no_mp 9401 approved accredited "$ORC4"
 confere "aviso de pagamento depois do cancelamento" "$(aviso_mp 9401)" PAGAMENTO_ESTORNADO
 R=$(resposta); IFS='|' read -r TIPO _ _ _ <<<"$R"

@@ -74,7 +74,10 @@ describe('CancelarOrcamentoUseCase', () => {
   it('orçamento aprovado: expira o link de pagamento e cancela', async () => {
     const { cancelar, orcamentos, gateway } = montar('APROVADO');
 
-    await cancelar.execute(cancelarOrcamento('PAGAMENTO_RECUSADO'), AGORA);
+    await cancelar.execute(
+      cancelarOrcamento('Cliente desistiu do pagamento'),
+      AGORA,
+    );
 
     expect(gateway.chamadas).toEqual(['expirarCobranca:pref-1']);
     expect((await orcamentos.buscarPorId(ORCAMENTO_ID))?.status).toBe(

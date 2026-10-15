@@ -69,8 +69,8 @@ flowchart LR
 
 1. Quando o mecânico conclui o diagnóstico, o OS Service publica `GerarOrcamento` com uma cópia das linhas da OS (serviços e itens, com os preços daquele momento). O Billing cria o orçamento, responde `OrcamentoEnviado` e manda o orçamento por e-mail ao cliente.
 2. O cliente aprova ou recusa pela API, com o token do CPF. O sistema externo também pode decidir, pelo webhook. Na aprovação, o Billing cria o link de pagamento no Mercado Pago, devolve o link na resposta e o envia por e-mail.
-3. O cliente paga pelo link. O Mercado Pago avisa o webhook do Billing, que consulta o pagamento na API do Mercado Pago e responde `PagamentoConfirmado` ou `PagamentoRecusado`.
-4. Se a Saga precisar desfazer, o OS Service manda `CancelarOrcamento` (o cliente ainda não pagou) ou `EstornarPagamento` (o reparo falhou depois do pagamento).
+3. O cliente paga pelo link. O Mercado Pago avisa o webhook do Billing, que consulta o pagamento na API do Mercado Pago e responde `PagamentoConfirmado` ou `PagamentoRecusado`. Uma recusa não encerra nada: o link continua valendo e o cliente pode tentar de novo com outro cartão ou outro meio. A OS só avança quando um pagamento é confirmado.
+4. Se a Saga precisar desfazer, o OS Service manda `CancelarOrcamento` (o funcionário cancelou a OS antes do pagamento) ou `EstornarPagamento` (o reparo falhou depois do pagamento).
 
 ## Ciclo do orçamento e do pagamento
 
@@ -94,7 +94,7 @@ Cada pagamento informado pelo Mercado Pago vira um registro, identificado pelo i
 | Status | Quando |
 |---|---|
 | `APROVADO` | pagamento aprovado que quitou o orçamento |
-| `RECUSADO` | tentativa recusada (cartão negado, por exemplo); fica no histórico |
+| `RECUSADO` | tentativa recusada (cartão negado, por exemplo); fica no histórico, e o cliente pode tentar de novo pelo mesmo link |
 | `ESTORNADO` | devolvido ao cliente, seja por compensação da Saga, seja porque chegou depois do cancelamento |
 
 ## Fluxos da Saga
@@ -130,8 +130,8 @@ O que o Billing faz em cada falha. A coluna **Compensação** é o que acontece 
 | Comando com dados inválidos ou totais que não fecham | Billing, no `GerarOrcamento` | não cria o orçamento | `GeracaoOrcamentoFalhou` (`COMANDO_INVALIDO: ...`) |
 | Cliente ou sistema externo recusa | Billing | marca `RECUSADO` | `OrcamentoRecusado` |
 | Mercado Pago fora na aprovação | Billing | nada muda; a rota responde 503 | — |
-| Pagamento recusado | Mercado Pago | registra a tentativa | `PagamentoRecusado` |
-| OS cancelada esperando o cliente | OS (`CancelarOrcamento`) | cancela; se já havia link, **expira o link**; se já estava pago, **estorna** | `PagamentoEstornado`, só se estornou |
+| Pagamento recusado | Mercado Pago | registra a tentativa; o orçamento continua `APROVADO` e o link continua valendo para nova tentativa | `PagamentoRecusado` (informativo: a OS continua aguardando pagamento) |
+| Funcionário cancela a OS esperando o cliente (desistência, link expirado) | OS (`CancelarOrcamento`) | cancela; se já havia link, **expira o link**; se já estava pago, **estorna** | `PagamentoEstornado`, só se estornou |
 | Reparo falhou depois do pagamento | OS (`EstornarPagamento`) | **estorna** e cancela o orçamento | `PagamentoEstornado` |
 | Pagamento aprovado depois do cancelamento | Mercado Pago | **estorna** | `PagamentoEstornado` |
 
@@ -160,7 +160,7 @@ Um tipo desconhecido é descartado com um log de aviso.
 | `OrcamentoAprovado` | aprovação do cliente ou do sistema externo | `{ orcamentoId, origem }` |
 | `OrcamentoRecusado` | recusa | `{ orcamentoId, origem, motivo }` |
 | `PagamentoConfirmado` | pagamento aprovado no Mercado Pago | `{ pagamentoId, valor, pagoEm }` |
-| `PagamentoRecusado` | pagamento recusado no Mercado Pago | `{ detalhe }` |
+| `PagamentoRecusado` | pagamento recusado no Mercado Pago; informativo, porque o cliente pode tentar de novo | `{ detalhe }` |
 | `PagamentoEstornado` | estorno feito | `{ pagamentoId, estornadoEm }` |
 
 ## API REST
@@ -304,12 +304,12 @@ Com o compose no ar, [`scripts/teste-ponta-a-ponta.sh`](scripts/teste-ponta-a-po
 bash scripts/teste-ponta-a-ponta.sh
 ```
 
-São 37 verificações em cinco cenários:
+São 42 verificações em cinco cenários:
 
 1. caminho feliz até o estorno: orçamento, aprovação, pagamento e falha no reparo;
 2. recusa pelo cliente;
-3. aprovação externa, pagamento recusado e cancelamento com o link expirado;
-4. pagamento que chega depois do cancelamento e é estornado;
+3. aprovação externa, pagamento recusado e nova tentativa aprovada pelo mesmo link;
+4. cancelamento pelo funcionário com o link expirado, e um pagamento que chega depois e é estornado;
 5. OS sem linhas, Mercado Pago fora na aprovação e aviso de pagamento desconhecido.
 
 O script também confere a idempotência: comando repetido, aviso repetido e estorno repetido.
@@ -321,7 +321,7 @@ npm test            # testes unitários
 npm run test:cov    # com cobertura; falha abaixo de 80% de linhas e instruções
 ```
 
-Resultado atual: **218 testes, 97% de linhas** (97,0% de instruções, 84,9% de branches, 98,1% de funções).
+Resultado atual: **219 testes, 97% de linhas** (97,0% de instruções, 84,9% de branches, 98,1% de funções).
 
 | Camada | O que os testes cobrem |
 |---|---|
@@ -366,7 +366,7 @@ A infraestrutura AWS do serviço (fila, banco, repositório de imagens e permiss
 
 - **Um orçamento por OS.** Recusa e cancelamento encerram a OS na Saga, então nunca há um segundo orçamento. O `osId` único é a chave da idempotência do `GerarOrcamento`.
 - **A cobrança só existe depois da aprovação.** O link é criado na aprovação, e não junto com o orçamento: o cliente não recebe cobrança de algo que ainda não aceitou.
-- **Pagamento recusado encerra a OS.** No Checkout Pro, o cliente poderia tentar de novo com outro cartão, mas o contrato da Saga cancela a OS na primeira recusa. Por isso o `CancelarOrcamento` expira o link. Um pagamento aprovado que ainda chegue depois disso é estornado.
+- **Pagamento recusado não encerra a OS** (contratos, versão 1.1). No Checkout Pro, o link continua aceitando pagamento depois de uma recusa, então o cliente pode tentar com outro cartão ou outro meio, e cada tentativa fica registrada. A OS só avança com um pagamento confirmado. Se o cliente desistir ou o link expirar, o funcionário cancela a OS, e o `CancelarOrcamento` expira o link. Um pagamento aprovado que ainda chegue depois disso é estornado.
 - **Link criado e não usado.** Se a gravação da aprovação falhar depois de o link ser criado no Mercado Pago, o link fica sem uso: ninguém o recebe, e ele expira no prazo. Não há compensação para isso porque não há cobrança.
 - **Assinatura do webhook do Mercado Pago não é validada.** A segurança vem da consulta do pagamento na API, que é a regra do contrato. A validação do header `x-signature` ficaria como extra.
 - **Sem tabela de mensagens processadas e sem outbox.** A idempotência vem do estado e das chaves naturais, e a consistência entre gravar e publicar vem da publicação dentro da transação, como definido nos contratos.
