@@ -83,7 +83,8 @@
       "!generated/**",
       "!main.ts",
       "!**/*.module.ts",
-      "!**/index.ts"
+      "!**/index.ts",
+      "!**/testes-de-apoio.ts"
     ],
     "coverageThreshold": {
       "global": {

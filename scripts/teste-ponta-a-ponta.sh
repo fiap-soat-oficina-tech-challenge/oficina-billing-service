@@ -26,7 +26,16 @@ ok()    { VERIFICACOES=$((VERIFICACOES + 1)); echo "  ok   $1"; }
 falha() { VERIFICACOES=$((VERIFICACOES + 1)); FALHAS=$((FALHAS + 1)); echo "  FALHA $1"; }
 confere() { if [ "$2" = "$3" ]; then ok "$1"; else falha "$1 (esperado '$3', veio '$2')"; fi; }
 uuid()  { python3 -c "import uuid;print(uuid.uuid4())"; }
-campo() { python3 -c "import sys,json;d=json.load(sys.stdin);print(eval('d'+sys.argv[1]))" "$1" 2>/dev/null; }
+# Lê um valor do JSON da entrada padrão pelo caminho de chaves, por exemplo
+# `campo 0 status`. Número indexa lista; o resto é chave de objeto.
+campo() {
+  python3 -c '
+import json, sys
+valor = json.load(sys.stdin)
+for chave in sys.argv[1:]:
+    valor = valor[int(chave)] if isinstance(valor, list) else valor[chave]
+print(valor)' "$@" 2>/dev/null
+}
 awslocal() { docker compose exec -T localstack awslocal "$@"; }
 
 # JWT HS256 assinado com o mesmo segredo do serviço.
@@ -64,7 +73,7 @@ resposta() {
       --max-number-of-messages 1 --output json)
     if [ -n "$saida" ] && echo "$saida" | grep -q ReceiptHandle; then
       local handle
-      handle=$(echo "$saida" | campo "['Messages'][0]['ReceiptHandle']")
+      handle=$(echo "$saida" | campo Messages 0 ReceiptHandle)
       awslocal sqs delete-message --queue-url "$FILA_RESPOSTAS" --receipt-handle "$handle"
       echo "$saida" | python3 -c '
 import json, sys
@@ -76,7 +85,25 @@ print("|".join([m["tipo"], m["osId"], m["correlationId"], json.dumps(m["payload"
   echo "nenhuma"
 }
 
-# Fila de respostas vazia (nenhuma resposta a mais do que o esperado).
+# Espera o serviço terminar de consumir a fila de comandos: nenhuma mensagem
+# esperando nem em processamento. Usado depois de um comando cujo efeito vai
+# ser conferido (ou cuja falta de efeito vai ser conferida).
+espera_fila_de_comandos_vazia() {
+  local esperando em_processamento
+  for _ in $(seq 1 30); do
+    read -r esperando em_processamento <<<"$(awslocal sqs get-queue-attributes \
+      --queue-url "$FILA_COMANDOS" \
+      --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible \
+      --query '[Attributes.ApproximateNumberOfMessages, Attributes.ApproximateNumberOfMessagesNotVisible]' \
+      --output text)"
+    [ "$esperando" = 0 ] && [ "$em_processamento" = 0 ] && return
+    sleep 1
+  done
+  falha "a fila de comandos não esvaziou em 30 s"
+}
+
+# Fila de respostas vazia (nenhuma resposta a mais do que o esperado). A espera
+# de 3 s é a janela em que uma resposta indevida apareceria.
 sem_resposta() {
   local r
   r=$(awslocal sqs receive-message --queue-url "$FILA_RESPOSTAS" --wait-time-seconds 3 --output json)
@@ -106,11 +133,11 @@ pagamento_no_mp() {
 aviso_mp() {
   curl -s -X POST "$API/webhooks/mercado-pago" -H 'Content-Type: application/json' \
     -d "{\"type\": \"payment\", \"action\": \"payment.updated\", \"data\": {\"id\": \"$1\"}, \"live_mode\": false}" |
-    campo "['resultado']"
+    campo resultado
 }
 
 orcamento_da_os() {
-  curl -s "$API/orcamentos?osId=$1" -H "Authorization: Bearer $TOKEN_FUNCIONARIO" | campo "[0]['$2']"
+  curl -s "$API/orcamentos?osId=$1" -H "Authorization: Bearer $TOKEN_FUNCIONARIO" | campo 0 "$2"
 }
 
 http_status() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
@@ -127,10 +154,11 @@ R=$(resposta); IFS='|' read -r TIPO OS_R CORR PAYLOAD <<<"$R"
 confere "GerarOrcamento → OrcamentoEnviado" "$TIPO" OrcamentoEnviado
 confere "resposta com o osId e o correlationId do comando" "$OS_R|$CORR" "$OS1|fluxo-${OS1:0:8}"
 ORC1=$(orcamento_da_os "$OS1" id)
-confere "valorTotal na resposta" "$(echo "$PAYLOAD" | campo "['valorTotal']")" 150.2
+confere "valorTotal na resposta" "$(echo "$PAYLOAD" | campo valorTotal)" 150.2
 confere "orçamento aguardando aprovação" "$(orcamento_da_os "$OS1" status)" AGUARDANDO_APROVACAO
 
 comando GerarOrcamento "$OS1" "$(payload_orcamento "$C1")"
+espera_fila_de_comandos_vazia
 sem_resposta "GerarOrcamento repetido não gera outra resposta"
 
 confere "outro cliente não vê o orçamento (404)" \
@@ -139,17 +167,17 @@ confere "funcionário não aprova pelo cliente (403)" \
   "$(http_status -X POST "$API/orcamentos/$ORC1/aprovar" -H "Authorization: Bearer $TOKEN_FUNCIONARIO")" 403
 
 APROVACAO=$(curl -s -X POST "$API/orcamentos/$ORC1/aprovar" -H "Authorization: Bearer $TOKEN_CLIENTE")
-confere "aprovação devolve o link do sandbox" "$(echo "$APROVACAO" | campo "['linkPagamento']")" \
+confere "aprovação devolve o link do sandbox" "$(echo "$APROVACAO" | campo linkPagamento)" \
   "http://localhost:8089/sandbox/checkout/pref-$ORC1"
 R=$(resposta); IFS='|' read -r TIPO _ _ PAYLOAD <<<"$R"
-confere "aprovação → OrcamentoAprovado (origem CLIENTE)" "$TIPO $(echo "$PAYLOAD" | campo "['origem']")" "OrcamentoAprovado CLIENTE"
+confere "aprovação → OrcamentoAprovado (origem CLIENTE)" "$TIPO $(echo "$PAYLOAD" | campo origem)" "OrcamentoAprovado CLIENTE"
 confere "aprovar de novo é 409" \
   "$(http_status -X POST "$API/orcamentos/$ORC1/aprovar" -H "Authorization: Bearer $TOKEN_CLIENTE")" 409
 
 pagamento_no_mp 9101 approved accredited "$ORC1"
 confere "aviso do Mercado Pago (aprovado)" "$(aviso_mp 9101)" PAGAMENTO_CONFIRMADO
 R=$(resposta); IFS='|' read -r TIPO _ _ PAYLOAD <<<"$R"
-confere "→ PagamentoConfirmado com o id do Mercado Pago" "$TIPO $(echo "$PAYLOAD" | campo "['pagamentoId']")" "PagamentoConfirmado 9101"
+confere "→ PagamentoConfirmado com o id do Mercado Pago" "$TIPO $(echo "$PAYLOAD" | campo pagamentoId)" "PagamentoConfirmado 9101"
 confere "orçamento PAGO" "$(orcamento_da_os "$OS1" status)" PAGO
 confere "aviso repetido não é tratado de novo" "$(aviso_mp 9101)" JA_PROCESSADO
 
@@ -159,12 +187,13 @@ confere "EstornarPagamento → PagamentoEstornado" "$TIPO" PagamentoEstornado
 confere "orçamento cancelado" "$(orcamento_da_os "$OS1" status)" CANCELADO
 PAGAMENTOS=$(curl -s "$API/pagamentos?osId=$OS1" -H "Authorization: Bearer $TOKEN_FUNCIONARIO")
 confere "pagamento estornado, com o motivo" \
-  "$(echo "$PAGAMENTOS" | campo "[0]['status']") $(echo "$PAGAMENTOS" | campo "[0]['motivoEstorno']")" \
+  "$(echo "$PAGAMENTOS" | campo 0 status) $(echo "$PAGAMENTOS" | campo 0 motivoEstorno)" \
   "ESTORNADO Reparo falhou: peça indisponível"
 confere "estorno chamado no Mercado Pago com a chave de idempotência" \
   "$(curl -s "$MP/__admin/requests" | python3 -c 'import json,sys;r=[x["request"] for x in json.load(sys.stdin)["requests"] if x["request"]["url"].endswith("/9101/refunds")];print(r[0]["headers"].get("X-Idempotency-Key") if r else "")')" \
   estorno-9101
 comando EstornarPagamento "$OS1" '{"motivo": "repetido"}'
+espera_fila_de_comandos_vazia
 sem_resposta "EstornarPagamento repetido não estorna de novo"
 
 echo "== 2. Cliente recusa o orçamento"
@@ -175,7 +204,7 @@ ORC2=$(orcamento_da_os "$OS2" id)
 curl -s -X POST "$API/orcamentos/$ORC2/recusar" -H "Authorization: Bearer $TOKEN_CLIENTE" \
   -H 'Content-Type: application/json' -d '{"motivo": "Valor acima do esperado"}' >/dev/null
 R=$(resposta); IFS='|' read -r TIPO _ _ PAYLOAD <<<"$R"
-confere "recusa → OrcamentoRecusado com o motivo" "$TIPO $(echo "$PAYLOAD" | campo "['motivo']")" \
+confere "recusa → OrcamentoRecusado com o motivo" "$TIPO $(echo "$PAYLOAD" | campo motivo)" \
   "OrcamentoRecusado Valor acima do esperado"
 confere "orçamento recusado" "$(orcamento_da_os "$OS2" status)" RECUSADO
 
@@ -189,18 +218,18 @@ confere "webhook externo sem token é 401" \
 curl -s -X POST "$API/webhooks/orcamento" -H "x-webhook-token: $WEBHOOK_TOKEN" \
   -H 'Content-Type: application/json' -d "{\"codigoOS\": \"$C3\", \"aprovado\": true}" >/dev/null
 R=$(resposta); IFS='|' read -r TIPO _ _ PAYLOAD <<<"$R"
-confere "→ OrcamentoAprovado (origem SISTEMA_EXTERNO)" "$TIPO $(echo "$PAYLOAD" | campo "['origem']")" \
+confere "→ OrcamentoAprovado (origem SISTEMA_EXTERNO)" "$TIPO $(echo "$PAYLOAD" | campo origem)" \
   "OrcamentoAprovado SISTEMA_EXTERNO"
 pagamento_no_mp 9301 rejected cc_rejected_other_reason "$ORC3"
 confere "aviso do Mercado Pago (recusado)" "$(aviso_mp 9301)" PAGAMENTO_RECUSADO
 R=$(resposta); IFS='|' read -r TIPO _ _ PAYLOAD <<<"$R"
-confere "→ PagamentoRecusado com o status_detail (informativo)" "$TIPO $(echo "$PAYLOAD" | campo "['detalhe']")" \
+confere "→ PagamentoRecusado com o status_detail (informativo)" "$TIPO $(echo "$PAYLOAD" | campo detalhe)" \
   "PagamentoRecusado cc_rejected_other_reason"
 confere "o orçamento continua aprovado, com o mesmo link" "$(orcamento_da_os "$OS3" status)" APROVADO
 pagamento_no_mp 9302 approved accredited "$ORC3"
 confere "nova tentativa aprovada" "$(aviso_mp 9302)" PAGAMENTO_CONFIRMADO
 R=$(resposta); IFS='|' read -r TIPO _ _ PAYLOAD <<<"$R"
-confere "→ PagamentoConfirmado com o id da segunda tentativa" "$TIPO $(echo "$PAYLOAD" | campo "['pagamentoId']")" \
+confere "→ PagamentoConfirmado com o id da segunda tentativa" "$TIPO $(echo "$PAYLOAD" | campo pagamentoId)" \
   "PagamentoConfirmado 9302"
 confere "orçamento PAGO" "$(orcamento_da_os "$OS3" status)" PAGO
 confere "as duas tentativas ficam registradas" \
@@ -215,7 +244,7 @@ ORC4=$(orcamento_da_os "$OS4" id)
 curl -s -X POST "$API/orcamentos/$ORC4/aprovar" -H "Authorization: Bearer $TOKEN_CLIENTE" >/dev/null
 resposta >/dev/null
 comando CancelarOrcamento "$OS4" '{"motivo": "Cliente desistiu do pagamento"}'
-sleep 3
+espera_fila_de_comandos_vazia
 confere "CancelarOrcamento cancela o orçamento" "$(orcamento_da_os "$OS4" status)" CANCELADO
 confere "e expira o link no Mercado Pago" \
   "$(curl -s "$MP/__admin/requests" | python3 -c "import json,sys;print(any(x['request']['method']=='PUT' and x['request']['url']=='/checkout/preferences/pref-$ORC4' for x in json.load(sys.stdin)['requests']))")" \
@@ -231,7 +260,7 @@ echo "== 5. Falhas de negócio e de dependência"
 OS5=$(uuid)
 comando GerarOrcamento "$OS5" "{\"codigo\": \"OS-2026-000005\", \"cliente\": {\"id\": \"$CLIENTE_ID\", \"nome\": \"Maria\"}, \"servicos\": [], \"itens\": [], \"valorServicos\": 0, \"valorPecas\": 0, \"valorTotal\": 0}"
 R=$(resposta); IFS='|' read -r TIPO _ _ PAYLOAD <<<"$R"
-confere "OS sem linhas → GeracaoOrcamentoFalhou ORCAMENTO_VAZIO" "$TIPO $(echo "$PAYLOAD" | campo "['motivo']")" \
+confere "OS sem linhas → GeracaoOrcamentoFalhou ORCAMENTO_VAZIO" "$TIPO $(echo "$PAYLOAD" | campo motivo)" \
   "GeracaoOrcamentoFalhou ORCAMENTO_VAZIO"
 
 OS6=$(uuid)

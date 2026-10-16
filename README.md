@@ -321,7 +321,7 @@ npm test            # testes unitários
 npm run test:cov    # com cobertura; falha abaixo de 80% de linhas e instruções
 ```
 
-Resultado atual: **219 testes, 97% de linhas** (97,0% de instruções, 84,9% de branches, 98,1% de funções).
+Resultado atual: **220 testes, 97% de linhas** (97,2% de instruções, 85,1% de branches, 98,3% de funções). Os dublês usados pelos testes (`testes-de-apoio.ts`) ficam fora da conta, para não inflar o número.
 
 | Camada | O que os testes cobrem |
 |---|---|

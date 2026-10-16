@@ -25,6 +25,8 @@ import {
 } from './controller/webhook.controller';
 import { apresentarOrcamento } from './presenter/orcamento.presenter';
 
+jest.mock('../../../common/mensageria/consumidor-sqs');
+
 const cliente = { id: CLIENTE_ID, tipo: 'cliente' } as AuthenticatedUser;
 const req = { user: cliente } as Request & { user: AuthenticatedUser };
 
@@ -193,41 +195,57 @@ describe('lerAvisoMercadoPago', () => {
 });
 
 describe('ComandosConsumer', () => {
-  afterEach(() => jest.restoreAllMocks());
+  // O consumidor da fila é simulado: o que importa aqui é a ligação entre a
+  // fila e os casos de uso, que o ComandosConsumer faz pelo construtor do
+  // ConsumidorSqs (fila e função de processamento).
+  const ConsumidorSqsSimulado = jest.mocked(ConsumidorSqs);
+
+  beforeEach(() => ConsumidorSqsSimulado.mockClear());
 
   function montar() {
     process.env.BILLING_COMMANDS_QUEUE_URL =
       'https://fila/oficina-billing-commands';
-    const iniciar = jest
-      .spyOn(ConsumidorSqs.prototype, 'iniciar')
-      .mockResolvedValue(undefined);
-    const parar = jest.spyOn(ConsumidorSqs.prototype, 'parar');
+    const sqs = new SQSClient({ region: 'us-east-1' });
     const gerar = { execute: jest.fn().mockResolvedValue(undefined) };
     const cancelar = { execute: jest.fn().mockResolvedValue(undefined) };
     const estornar = { execute: jest.fn().mockResolvedValue(undefined) };
 
     const consumer = new ComandosConsumer(
-      new SQSClient({ region: 'us-east-1' }),
+      sqs,
       gerar as unknown as GerarOrcamentoUseCase,
       cancelar as unknown as CancelarOrcamentoUseCase,
       estornar as unknown as EstornarPagamentoUseCase,
     );
-    const processar = (
-      consumer as unknown as {
-        consumidor: { processar: (e: unknown) => Promise<void> };
-      }
-    ).consumidor.processar;
-    return { consumer, iniciar, parar, gerar, cancelar, estornar, processar };
+    const [cliente, fila, processar] = ConsumidorSqsSimulado.mock.calls[0];
+    const consumidor = jest.mocked(ConsumidorSqsSimulado.mock.instances[0]);
+    return {
+      sqs,
+      consumer,
+      consumidor,
+      cliente,
+      fila,
+      processar,
+      gerar,
+      cancelar,
+      estornar,
+    };
   }
 
+  it('consome a fila de comandos do Billing', () => {
+    const { sqs, cliente, fila } = montar();
+
+    expect(cliente).toBe(sqs);
+    expect(fila).toBe('https://fila/oficina-billing-commands');
+  });
+
   it('inicia o consumo na subida e para no desligamento', () => {
-    const { consumer, iniciar, parar } = montar();
+    const { consumer, consumidor } = montar();
 
     consumer.onApplicationBootstrap();
     consumer.onApplicationShutdown();
 
-    expect(iniciar).toHaveBeenCalledTimes(1);
-    expect(parar).toHaveBeenCalledTimes(1);
+    expect(consumidor.iniciar.mock.calls).toHaveLength(1);
+    expect(consumidor.parar.mock.calls).toHaveLength(1);
   });
 
   it('entrega cada comando ao caso de uso do seu tipo', async () => {
