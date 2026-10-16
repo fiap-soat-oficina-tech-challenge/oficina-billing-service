@@ -51,19 +51,25 @@ export function lerEnvelope(corpo: string | undefined): Envelope {
     throw new EnvelopeInvalidoError('corpo não é JSON');
   }
 
+  validarEnvelope(dado);
+  return dado;
+}
+
+/** Confere campo a campo o formato do envelope; lança se algo faltar. */
+function validarEnvelope(dado: unknown): asserts dado is Envelope {
   if (typeof dado !== 'object' || dado === null) {
     throw new EnvelopeInvalidoError('corpo não é um objeto');
   }
 
-  const registro = dado as Record<string, unknown>;
   for (const campo of CAMPOS_TEXTO) {
-    if (typeof registro[campo] !== 'string' || registro[campo] === '') {
+    const valor: unknown = Reflect.get(dado, campo);
+    if (typeof valor !== 'string' || valor === '') {
       throw new EnvelopeInvalidoError(`campo ${campo} ausente`);
     }
   }
-  if (typeof registro.payload !== 'object' || registro.payload === null) {
+
+  const payload: unknown = Reflect.get(dado, 'payload');
+  if (typeof payload !== 'object' || payload === null) {
     throw new EnvelopeInvalidoError('campo payload ausente');
   }
-
-  return registro as unknown as Envelope;
 }
