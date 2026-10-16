@@ -3,7 +3,7 @@
   "version": "0.0.1",
   "description": "Orçamentos, aprovação e pagamentos com o Mercado Pago.",
   "private": true,
-  "license": "UNLICENSED",
+  "license": "MIT",
   "scripts": {
     "build": "nest build",
     "format": "prettier --write \"src/**/*.ts\"",
