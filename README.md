@@ -330,7 +330,7 @@ Resultado atual: **220 testes, 97% de linhas** (97,2% de instruções, 85,1% de 
 | Infraestrutura | chamadas ao Mercado Pago (corpo, headers, timeout e novas tentativas), e-mails, mapeamento do Prisma |
 | Interface | rotas, leitura do aviso do Mercado Pago nos formatos webhook e IPN, e roteamento dos comandos |
 
-O CI (`.github/workflows/ci.yml`) roda lint, testes com cobertura e build em todo PR; o check `Build & Test` é obrigatório para o merge na `main`.
+O CI (`.github/workflows/ci.yml`) roda lint, testes com cobertura e build em todo PR; o check `Build & Test` é obrigatório para o merge na `main`. No push na `develop` e na `main`, o mesmo CI roda como primeiro estágio do [deploy](#deploy).
 
 ## Variáveis de ambiente
 
@@ -351,9 +351,34 @@ O CI (`.github/workflows/ci.yml`) roda lint, testes com cobertura e build em tod
 
 ## Deploy
 
-Os manifestos ficam em `k8s/`, no namespace `oficina-billing`. A ordem de aplicação acompanha a numeração dos arquivos: ConfigMap, Job de migração (`prisma migrate deploy`, que precisa terminar antes), Deployment, Service, HPA, Ingress e PDB. O Ingress compartilha o ALB dos três serviços (`group.name: oficina`) e encaminha `/billing` para este serviço. Os segredos chegam pelo Secret `billing-secret`, montado a partir do SSM. A lista está em [`terraform/README.md`](terraform/README.md). O pipeline de deploy no EKS entra na etapa de integração do plano de ação.
+O deploy é automático, pelo workflow `.github/workflows/cd.yml`, a cada push na `develop` e na `main`. As duas branches vão para o mesmo cluster.
 
-A infraestrutura AWS do serviço (fila, banco, repositório de imagens e permissões) está em [`terraform/`](terraform/README.md).
+```mermaid
+flowchart LR
+    CI["CI<br/>lint · testes (mínimo 80%) · build"]
+    AMB{"Ambiente<br/>no ar?"}
+    IMG["Imagem<br/>ECR oficina-billing-service"]
+    DEP["Deploy no EKS<br/>Secret do SSM · ConfigMap · migração · rollout"]
+    SMK["Smoke test"]
+    PULA["Pulado, com aviso"]
+
+    CI --> IMG
+    AMB -->|sim| IMG
+    AMB -->|não| PULA
+    IMG --> DEP --> SMK
+```
+
+| Estágio | O que faz |
+|---|---|
+| CI | O mesmo workflow dos PRs (`ci.yml`). Se falhar, nada é publicado. |
+| Ambiente na AWS | O ambiente só existe nas janelas de integração e demonstração. Sem o secret `AWS_ROLE_ARN` ou sem o cluster `tc3-oficina-homolog`, a imagem e o deploy são pulados com um aviso no resumo da execução. Qualquer outro erro falha o pipeline. |
+| Build & Push (ECR) | Imagem `linux/amd64` com duas tags: o commit e a branch. |
+| Deploy (EKS) | Monta o Secret `billing-secret` a partir do SSM, aplica o ConfigMap com o endereço do API Gateway lido do SSM, roda o Job de migração (`prisma migrate deploy`) e só então aplica Deployment, Service, HPA, Ingress e PDB, esperando o rollout. Um deploy por vez. |
+| Smoke test | Readiness com o banco, rotas protegidas respondendo 401 sem JWT e com token de webhook errado, e o HPA com ao menos duas réplicas. Não grava dados: o fluxo com os outros serviços é conferido pelo smoke test do OS Service. |
+
+Os manifestos ficam em `k8s/`, no namespace `oficina-billing`, numerados na ordem de aplicação. O Ingress compartilha o ALB dos três serviços (`group.name: oficina`) e encaminha `/billing` para este serviço. A lista de parâmetros do SSM está em [`terraform/README.md`](terraform/README.md).
+
+A infraestrutura AWS do serviço (fila, banco, repositório de imagens, parâmetros e permissões) está em [`terraform/`](terraform/README.md). O pipeline assume a role `tc3-github-actions` por OIDC, sem chave de acesso guardada no GitHub. O secret `AWS_ROLE_ARN` é o ARN dessa role, e o repositório precisa estar na lista de repositórios aceitos por ela (`bootstrap/` de `tc3-infra-k8s`).
 
 ## Fluxo de trabalho
 

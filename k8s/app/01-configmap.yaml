@@ -20,12 +20,13 @@ data:
 
   # Mercado Pago (Checkout Pro) com credenciais de teste: o link devolvido ao
   # cliente é o do sandbox. O aviso de pagamento chega pelo API Gateway da
-  # plataforma (tc3-auth-lambda), que encaminha /billing ao ALB. O host do API
-  # Gateway muda se ele for recriado — conferir na etapa de integração, junto
-  # com o MAIL_LAMBDA_URL (mesmo host do OS Service).
+  # plataforma (tc3-auth-lambda), que encaminha /billing ao ALB, e o e-mail sai
+  # pela Lambda /mail do mesmo API Gateway. O endereço muda quando a plataforma
+  # é recriada, então o CD troca API_GATEWAY_URL_PLACEHOLDER pelo valor do
+  # parâmetro API_GATEWAY_URL do SSM, publicado por aquela stack.
   MERCADO_PAGO_SANDBOX: "true"
-  MERCADO_PAGO_NOTIFICATION_URL: "https://8hkalepe37.execute-api.us-east-1.amazonaws.com/billing/webhooks/mercado-pago"
-  MAIL_LAMBDA_URL: "https://8hkalepe37.execute-api.us-east-1.amazonaws.com/mail"
+  MERCADO_PAGO_NOTIFICATION_URL: "API_GATEWAY_URL_PLACEHOLDER/billing/webhooks/mercado-pago"
+  MAIL_LAMBDA_URL: "API_GATEWAY_URL_PLACEHOLDER/mail"
 
   # Observabilidade — mesmos valores do OS Service, mudando só o nome do app.
   NEW_RELIC_ENABLED: "true"
