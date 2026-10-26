@@ -4,7 +4,7 @@ Terraform dos recursos AWS que pertencem a este serviço:
 
 - Fila `oficina-billing-commands` e a DLQ `oficina-billing-commands-dlq`
 - RDS PostgreSQL próprio (`oficina-billing-db`), em subnet privada, acessível só dos nós do EKS
-- Parâmetro `/tc3-oficina/homolog/billing/DATABASE_URL` no SSM
+- Parâmetros `/tc3-oficina/homolog/billing/DATABASE_URL` e `/tc3-oficina/homolog/billing/WEBHOOK_ORCAMENTO_TOKEN` no SSM
 - Repositório de imagens `oficina-billing-service` no ECR
 - Política de acesso anexada à role dos nós do EKS: consumir a própria fila e publicar em `oficina-os-saga-replies`
 
@@ -15,12 +15,13 @@ O CD monta o Secret `billing-secret` do Kubernetes a partir destes parâmetros (
 | Parâmetro | Origem |
 |---|---|
 | `billing/DATABASE_URL` | criado por esta stack (`rds.tf`) |
+| `billing/WEBHOOK_ORCAMENTO_TOKEN` | gerado por esta stack (`ssm.tf`); quem integra o sistema externo de aprovação lê o mesmo parâmetro |
 | `JWT_SECRET` | o mesmo do OS Service e da Lambda de autenticação (Fase 3) |
 | `MAIL_API_TOKEN` | o mesmo do OS Service, gerado pela stack `tc3-auth-lambda` |
 | `NEW_RELIC_LICENSE_KEY` | publicado por `tc3-infra-k8s` |
 | `billing/MERCADO_PAGO_ACCESS_TOKEN` | **criado à mão**, com o Access Token de teste da aplicação do Checkout Pro (como os parâmetros `MAIL_*` da Fase 3: é credencial de conta externa e não sai do Terraform) |
 
-O token do webhook de aprovação externa (`WEBHOOK_ORCAMENTO_TOKEN`) é o mesmo do OS Service na Fase 3.
+O ConfigMap também depende de um parâmetro que não é segredo: `API_GATEWAY_URL`, o endereço do API Gateway publicado pela stack `tc3-auth-lambda`. O CD o usa para montar a URL do aviso do Mercado Pago e a da Lambda de e-mail, que mudam quando a plataforma é recriada.
 
 ## Dependências e ordem
 
