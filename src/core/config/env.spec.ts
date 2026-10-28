@@ -10,6 +10,7 @@ const OBRIGATORIAS = [
   'BILLING_COMMANDS_QUEUE_URL',
   'SAGA_REPLIES_QUEUE_URL',
   'MERCADO_PAGO_ACCESS_TOKEN',
+  'MERCADO_PAGO_CAIXA_ID',
 ];
 
 describe('validateEnv', () => {

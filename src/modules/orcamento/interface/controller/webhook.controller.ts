@@ -29,20 +29,19 @@ import { ProcessarNotificacaoPagamentoUseCase } from '../../application/use-case
 import { apresentarOrcamento } from '../presenter/orcamento.presenter';
 
 /**
- * Lê o id do pagamento de um aviso do Mercado Pago. O aviso pode vir no formato
- * de webhook (corpo `{ type: "payment", data: { id } }` e query
- * `?type=payment&data.id=...`) ou no formato antigo de IPN
- * (`?topic=payment&id=...`). Avisos de outros tópicos devolvem null.
+ * Lê o id da order de um aviso do Mercado Pago (corpo
+ * `{ type: "order", action: "order.processed", data: { id } }` e query
+ * `?type=order&data.id=...`). Avisos de outros tópicos devolvem null.
  */
 export function lerAvisoMercadoPago(
   query: Record<string, unknown>,
   corpo: Record<string, unknown> | undefined,
 ): string | null {
   const dados = corpo?.data as Record<string, unknown> | undefined;
-  const topico = corpo?.type ?? query.type ?? query.topic;
-  const id = dados?.id ?? query['data.id'] ?? query.id;
+  const topico = corpo?.type ?? query.type;
+  const id = dados?.id ?? query['data.id'];
 
-  if (topico !== 'payment') return null;
+  if (topico !== 'order') return null;
   if (typeof id !== 'string' && typeof id !== 'number') return null;
   return String(id);
 }
@@ -67,7 +66,7 @@ export class WebhookController {
   @ApiOperation({
     summary: 'Aprovação ou recusa do orçamento pelo sistema externo',
     description:
-      'Mesmo corpo do webhook do OS Service na Fase 3; só a URL mudou. Na aprovação, o link de pagamento é criado e enviado ao cliente por e-mail.',
+      'Mesmo corpo do webhook do OS Service na Fase 3; só a URL mudou. Na aprovação, a cobrança é criada e o QR Code é enviado ao cliente por e-mail.',
   })
   @ApiOkResponse({ type: OrcamentoResponseDto })
   @ApiResponse({ status: 401, description: 'Token ausente ou inválido' })
@@ -101,16 +100,16 @@ export class WebhookController {
   @Post('mercado-pago')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
-    summary: 'Aviso de pagamento do Mercado Pago',
+    summary: 'Aviso de cobrança do Mercado Pago',
     description:
-      'Só trata o tópico payment. Confirma o pagamento em GET /v1/payments/{id} e avisa o orquestrador. Responde 200 também para avisos ignorados ou repetidos; erro faz o Mercado Pago reenviar.',
+      'Só trata o tópico order. Confirma o pagamento em GET /v1/orders/{id} e avisa o orquestrador. Responde 200 também para avisos ignorados ou repetidos; erro faz o Mercado Pago reenviar.',
   })
   @ApiBody({
     schema: {
       example: {
-        type: 'payment',
-        action: 'payment.updated',
-        data: { id: '123456789' },
+        type: 'order',
+        action: 'order.processed',
+        data: { id: 'ORD01JV3AW3NFSTSTB669F41NACDX' },
       },
     },
   })
@@ -119,8 +118,8 @@ export class WebhookController {
     @Query() query: Record<string, unknown>,
     @Body() corpo: Record<string, unknown>,
   ): Promise<NotificacaoMercadoPagoResponseDto> {
-    const pagamentoId = lerAvisoMercadoPago(query, corpo);
-    if (!pagamentoId) return { resultado: 'IGNORADO' };
-    return { resultado: await this.processarNotificacao.execute(pagamentoId) };
+    const cobrancaId = lerAvisoMercadoPago(query, corpo);
+    if (!cobrancaId) return { resultado: 'IGNORADO' };
+    return { resultado: await this.processarNotificacao.execute(cobrancaId) };
   }
 }

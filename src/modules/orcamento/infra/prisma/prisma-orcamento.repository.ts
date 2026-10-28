@@ -102,9 +102,9 @@ export class PrismaOrcamentoRepository implements OrcamentoRepository {
       data: {
         ...campos,
         ...(cobranca && {
-          preferenciaId: cobranca.preferenciaId,
-          linkPagamento: cobranca.linkPagamento,
-          linkExpiraEm: cobranca.expiraEm,
+          cobrancaId: cobranca.id,
+          qrCode: cobranca.qrCode,
+          cobrancaExpiraEm: cobranca.expiraEm,
         }),
       },
     });
@@ -143,11 +143,11 @@ function paraDominio(gravado: OrcamentoGravado): Orcamento {
     motivoRecusa: gravado.motivoRecusa,
     motivoCancelamento: gravado.motivoCancelamento,
     cobranca:
-      gravado.preferenciaId && gravado.linkPagamento && gravado.linkExpiraEm
+      gravado.cobrancaId && gravado.qrCode && gravado.cobrancaExpiraEm
         ? {
-            preferenciaId: gravado.preferenciaId,
-            linkPagamento: gravado.linkPagamento,
-            expiraEm: gravado.linkExpiraEm,
+            id: gravado.cobrancaId,
+            qrCode: gravado.qrCode,
+            expiraEm: gravado.cobrancaExpiraEm,
           }
         : null,
     criadoEm: gravado.criadoEm,

@@ -11,6 +11,6 @@ export interface Notificador {
   /** O orçamento gerado, com o que fazer para aprovar ou recusar. */
   enviarOrcamento(orcamento: Orcamento): Promise<void>;
 
-  /** O link de pagamento, depois da aprovação. */
-  enviarLinkPagamento(orcamento: Orcamento): Promise<void>;
+  /** O QR Code de pagamento, depois da aprovação. */
+  enviarCobranca(orcamento: Orcamento): Promise<void>;
 }

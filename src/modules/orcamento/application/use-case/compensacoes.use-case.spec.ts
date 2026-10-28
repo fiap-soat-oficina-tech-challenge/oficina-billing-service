@@ -12,6 +12,8 @@ import {
 } from './testes-de-apoio';
 import type { StatusOrcamento } from '../../domain/orcamento';
 
+const ID = COBRANCA.id;
+
 /** Os dois comandos de compensação da Saga: CancelarOrcamento e EstornarPagamento. */
 function montar(status: StatusOrcamento, comPagamentoAprovado = false) {
   const cenario = criarCenario();
@@ -23,7 +25,7 @@ function montar(status: StatusOrcamento, comPagamentoAprovado = false) {
     }),
   );
   if (comPagamentoAprovado) {
-    cenario.pagamentos.pagamentos.set('1234567890', pagamentoDeExemplo());
+    cenario.pagamentos.pagamentos.set(ID, pagamentoDeExemplo());
   }
   const estorno = new EstornoDePagamento(
     cenario.gateway,
@@ -71,7 +73,7 @@ describe('CancelarOrcamentoUseCase', () => {
     expect(publicador.publicadas).toHaveLength(0);
   });
 
-  it('orçamento aprovado: expira o link de pagamento e cancela', async () => {
+  it('orçamento aprovado: cancela a cobrança (QR Code) no Mercado Pago e o orçamento', async () => {
     const { cancelar, orcamentos, gateway } = montar('APROVADO');
 
     await cancelar.execute(
@@ -79,13 +81,13 @@ describe('CancelarOrcamentoUseCase', () => {
       AGORA,
     );
 
-    expect(gateway.chamadas).toEqual(['expirarCobranca:pref-1']);
+    expect(gateway.chamadas).toEqual([`cancelarCobranca:${ID}`]);
     expect((await orcamentos.buscarPorId(ORCAMENTO_ID))?.status).toBe(
       'CANCELADO',
     );
   });
 
-  it('Mercado Pago fora ao expirar o link: erro e o orçamento não muda (a fila repete)', async () => {
+  it('Mercado Pago fora ao cancelar a cobrança: erro e o orçamento não muda (a fila repete)', async () => {
     const { cancelar, orcamentos, gateway } = montar('APROVADO');
     gateway.falha = new Error('Mercado Pago fora');
 
@@ -108,8 +110,8 @@ describe('CancelarOrcamentoUseCase', () => {
       AGORA,
     );
 
-    expect(gateway.chamadas).toEqual(['estornar:1234567890']);
-    expect(await pagamentos.buscarPorId('1234567890')).toMatchObject({
+    expect(gateway.chamadas).toEqual([`estornar:${ID}`]);
+    expect(await pagamentos.buscarPorId(ID)).toMatchObject({
       status: 'ESTORNADO',
       motivoEstorno: 'Cancelada pelo funcionário',
     });
@@ -119,7 +121,7 @@ describe('CancelarOrcamentoUseCase', () => {
     expect(publicador.publicadas[0]).toMatchObject({
       tipo: 'PagamentoEstornado',
       correlationId: 'fluxo-da-os',
-      payload: { pagamentoId: '1234567890' },
+      payload: { pagamentoId: ID },
     });
   });
 
@@ -184,8 +186,8 @@ describe('EstornarPagamentoUseCase', () => {
       AGORA,
     );
 
-    expect(gateway.chamadas).toEqual(['estornar:1234567890']);
-    expect(await pagamentos.buscarPorId('1234567890')).toMatchObject({
+    expect(gateway.chamadas).toEqual([`estornar:${ID}`]);
+    expect(await pagamentos.buscarPorId(ID)).toMatchObject({
       status: 'ESTORNADO',
       motivoEstorno: 'Reparo falhou: peça indisponível',
     });
@@ -202,7 +204,7 @@ describe('EstornarPagamentoUseCase', () => {
     await estornar.execute(estornarPagamento(), AGORA);
     await estornar.execute(estornarPagamento(), AGORA);
 
-    expect(gateway.chamadas).toEqual(['estornar:1234567890']);
+    expect(gateway.chamadas).toEqual([`estornar:${ID}`]);
     expect(publicador.tipos()).toEqual(['PagamentoEstornado']);
   });
 
@@ -213,22 +215,15 @@ describe('EstornarPagamentoUseCase', () => {
     await expect(estornar.execute(estornarPagamento(), AGORA)).rejects.toThrow(
       'SQS fora',
     );
-    expect((await pagamentos.buscarPorId('1234567890'))?.status).toBe(
-      'APROVADO',
-    );
+    expect((await pagamentos.buscarPorId(ID))?.status).toBe('APROVADO');
 
     publicador.falhar = false;
     await estornar.execute(estornarPagamento(), AGORA);
 
     // O gateway recebe o mesmo estorno duas vezes; a chave de idempotência do
     // adaptador do Mercado Pago faz o segundo não estornar de novo.
-    expect(gateway.chamadas).toEqual([
-      'estornar:1234567890',
-      'estornar:1234567890',
-    ]);
-    expect((await pagamentos.buscarPorId('1234567890'))?.status).toBe(
-      'ESTORNADO',
-    );
+    expect(gateway.chamadas).toEqual([`estornar:${ID}`, `estornar:${ID}`]);
+    expect((await pagamentos.buscarPorId(ID))?.status).toBe('ESTORNADO');
   });
 
   it('outro estorno chegou antes: erro, e a nova tentativa não acha pagamento aprovado', async () => {
@@ -247,9 +242,7 @@ describe('EstornarPagamentoUseCase', () => {
     await expect(estornar.execute(estornarPagamento(), AGORA)).rejects.toThrow(
       'alterado por outra ação',
     );
-    expect((await pagamentos.buscarPorId('1234567890'))?.status).toBe(
-      'APROVADO',
-    );
+    expect((await pagamentos.buscarPorId(ID))?.status).toBe('APROVADO');
   });
 
   it('OS sem pagamento aprovado: nada a fazer', async () => {

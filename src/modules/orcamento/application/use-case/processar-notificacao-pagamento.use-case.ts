@@ -27,28 +27,24 @@ import { EstornoDePagamento } from '../shared/estorno-de-pagamento';
 
 /** O que foi feito com o aviso; volta na resposta do webhook, para conferência. */
 export type ResultadoNotificacao =
-  | 'PAGAMENTO_CONFIRMADO'
-  | 'PAGAMENTO_RECUSADO'
-  | 'PAGAMENTO_ESTORNADO'
-  | 'JA_PROCESSADO'
-  | 'IGNORADO';
+  'PAGAMENTO_CONFIRMADO' | 'PAGAMENTO_ESTORNADO' | 'JA_PROCESSADO' | 'IGNORADO';
 
 /**
- * Trata o aviso de pagamento do Mercado Pago (webhook, tópico `payment`).
+ * Trata o aviso do Mercado Pago sobre a cobrança (webhook, tópico `order`).
  *
- * O aviso só diz "o pagamento X mudou". O conteúdo nunca é usado: o pagamento
- * é consultado no Mercado Pago (`GET /v1/payments/{id}`), e é dessa consulta
- * que vêm a situação, o valor e o orçamento (`external_reference`).
+ * O aviso só diz "a order X mudou". O conteúdo nunca é usado: a order é
+ * consultada no Mercado Pago (`GET /v1/orders/{id}`), e é dessa consulta que
+ * vêm a situação, o valor e o orçamento (`external_reference`).
  *
- * - Aprovado, com o orçamento aguardando pagamento: registra, marca o orçamento
+ * - Paga, com o orçamento aguardando pagamento: registra, marca o orçamento
  *   como PAGO e responde `PagamentoConfirmado` (a OS vai para execução).
- * - Aprovado, com o orçamento cancelado ou já pago: estorna e responde
+ * - Paga, com o orçamento cancelado ou já pago: estorna e responde
  *   `PagamentoEstornado` — nenhuma OS cancelada fica com dinheiro retido.
- * - Recusado: registra a tentativa e, se o orçamento aguardava pagamento,
- *   responde `PagamentoRecusado`, que é informativo: o orçamento continua
- *   APROVADO, o link continua valendo e o cliente pode tentar de novo. A OS só
- *   avança quando um pagamento é aprovado.
- * - Pendente, em análise e afins: nada a fazer; o Mercado Pago avisa de novo.
+ * - Cancelada, expirada ou estornada: nada a fazer. São consequências do que
+ *   este serviço mesmo pediu, ou do prazo do QR Code.
+ *
+ * Uma tentativa recusada não gera aviso: a order continua aberta e o cliente
+ * paga de novo pelo mesmo QR Code. A OS só avança com um pagamento aprovado.
  *
  * O Mercado Pago repete avisos: um pagamento já registrado não é tratado de
  * novo. Se algo falhar, o erro volta para o Mercado Pago, que reenvia o aviso.
@@ -70,16 +66,16 @@ export class ProcessarNotificacaoPagamentoUseCase {
   ) {}
 
   async execute(
-    pagamentoId: string,
+    cobrancaId: string,
     agora: Date = new Date(),
   ): Promise<ResultadoNotificacao> {
-    const pagamento = await this.gateway.consultarPagamento(pagamentoId);
+    const pagamento = await this.gateway.consultarPagamento(cobrancaId);
     if (!pagamento) {
-      // Id que o Mercado Pago não conhece (por exemplo, o aviso de teste do
+      // Id que o Mercado Pago não conhece (por exemplo, o aviso simulado do
       // painel). Responder com erro faria o aviso ser repetido à toa.
       registrarEvento('pagamento.aviso_ignorado', {
-        pagamento_id: pagamentoId,
-        razao: 'pagamento_inexistente',
+        pagamento_id: cobrancaId,
+        razao: 'cobranca_inexistente',
       });
       return 'IGNORADO';
     }
@@ -100,11 +96,6 @@ export class ProcessarNotificacaoPagamentoUseCase {
         pagamento_id: pagamento.id,
       });
       return 'JA_PROCESSADO';
-    }
-
-    if (pagamento.situacao === 'RECUSADO') {
-      await this.registrarRecusa(pagamento, orcamento, agora);
-      return 'PAGAMENTO_RECUSADO';
     }
 
     if (orcamento.status === 'APROVADO') {
@@ -171,55 +162,6 @@ export class ProcessarNotificacaoPagamentoUseCase {
       orcamento_id: orcamento.id,
       os_id: orcamento.osId,
       valor: pagamento.valor,
-    });
-  }
-
-  /**
-   * Registra a recusa sem mudar o orçamento: o cliente pode pagar de novo pelo
-   * mesmo link. Só avisa o orquestrador (para o histórico da OS) se o orçamento
-   * ainda aguardava pagamento; uma recusa depois do cancelamento fica apenas
-   * registrada aqui.
-   */
-  private async registrarRecusa(
-    pagamento: PagamentoNoGateway,
-    orcamento: Orcamento,
-    agora: Date,
-  ): Promise<void> {
-    const avisarSaga = orcamento.status === 'APROVADO';
-
-    await this.transacao.executar(async ({ pagamentos }) => {
-      await pagamentos.registrar({
-        id: pagamento.id,
-        orcamentoId: orcamento.id,
-        osId: orcamento.osId,
-        status: 'RECUSADO',
-        valor: pagamento.valor,
-        detalhe: pagamento.detalhe,
-        registradoEm: agora,
-        pagoEm: null,
-        estornadoEm: null,
-        motivoEstorno: null,
-      });
-
-      if (avisarSaga) {
-        await this.publicador.publicar(
-          criarEnvelope(
-            RESPOSTAS.pagamentoRecusado,
-            orcamento.osId,
-            orcamento.correlationId,
-            { detalhe: pagamento.detalhe },
-            agora,
-          ),
-        );
-      }
-    });
-
-    registrarEvento('pagamento.recusado', {
-      pagamento_id: pagamento.id,
-      orcamento_id: orcamento.id,
-      os_id: orcamento.osId,
-      detalhe: pagamento.detalhe,
-      saga_avisada: avisarSaga,
     });
   }
 
