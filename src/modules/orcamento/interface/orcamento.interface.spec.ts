@@ -30,9 +30,12 @@ jest.mock('../../../common/mensageria/consumidor-sqs');
 const cliente = { id: CLIENTE_ID, tipo: 'cliente' } as AuthenticatedUser;
 const req = { user: cliente } as Request & { user: AuthenticatedUser };
 
+/** Assinatura de todo arquivo PNG, em base64. */
+const PNG_BASE64 = 'iVBORw0KGgo';
+
 describe('apresentarOrcamento', () => {
-  it('devolve as linhas com os ids do OS Service e o link no primeiro nível', () => {
-    const resposta = apresentarOrcamento(
+  it('devolve as linhas com os ids do OS Service e o QR Code no primeiro nível', async () => {
+    const resposta = await apresentarOrcamento(
       orcamentoDeExemplo({
         status: 'APROVADO',
         cobranca: COBRANCA,
@@ -56,16 +59,20 @@ describe('apresentarOrcamento', () => {
       subtotal: 120,
     });
     expect(resposta.itens[0].itemEstoqueId).toBe('item-1');
-    expect(resposta.linkPagamento).toBe(COBRANCA.linkPagamento);
-    expect(resposta.linkExpiraEm).toEqual(COBRANCA.expiraEm);
+    expect(resposta.qrCode).toEqual({
+      conteudo: COBRANCA.qrCode,
+      imagem: expect.stringMatching(
+        new RegExp(`^data:image/png;base64,${PNG_BASE64}`),
+      ) as unknown,
+      expiraEm: COBRANCA.expiraEm,
+    });
     expect(resposta).not.toHaveProperty('cobranca');
   });
 
-  it('antes da aprovação, o link é null', () => {
-    expect(apresentarOrcamento(orcamentoDeExemplo())).toMatchObject({
-      linkPagamento: null,
-      linkExpiraEm: null,
-    });
+  it('antes da aprovação, o QR Code é null', async () => {
+    await expect(
+      apresentarOrcamento(orcamentoDeExemplo()),
+    ).resolves.toMatchObject({ qrCode: null });
   });
 });
 
@@ -155,21 +162,21 @@ describe('WebhookController', () => {
     ]);
   });
 
-  it('aviso de pagamento: processa e devolve o resultado', async () => {
+  it('aviso da order: processa e devolve o resultado', async () => {
     await expect(
       controller.notificacaoMercadoPago(
-        {},
-        { type: 'payment', data: { id: '123' } },
+        { type: 'order', 'data.id': 'ORD123' },
+        { type: 'order', action: 'order.processed', data: { id: 'ORD123' } },
       ),
     ).resolves.toEqual({ resultado: 'PAGAMENTO_CONFIRMADO' });
-    expect(processar.execute).toHaveBeenCalledWith('123');
+    expect(processar.execute).toHaveBeenCalledWith('ORD123');
   });
 
   it('aviso de outro tópico é ignorado sem consultar o Mercado Pago', async () => {
     await expect(
       controller.notificacaoMercadoPago(
-        { topic: 'merchant_order', id: '1' },
-        {},
+        { type: 'payment', 'data.id': '1' },
+        { type: 'payment', data: { id: '1' } },
       ),
     ).resolves.toEqual({ resultado: 'IGNORADO' });
     expect(processar.execute).not.toHaveBeenCalled();
@@ -178,12 +185,12 @@ describe('WebhookController', () => {
 
 describe('lerAvisoMercadoPago', () => {
   it.each([
-    ['webhook (corpo)', {}, { type: 'payment', data: { id: '123' } }, '123'],
-    ['webhook (query)', { type: 'payment', 'data.id': '123' }, {}, '123'],
-    ['IPN', { topic: 'payment', id: '123' }, undefined, '123'],
-    ['id numérico', {}, { type: 'payment', data: { id: 123 } }, '123'],
-    ['outro tópico', {}, { type: 'plan', data: { id: '1' } }, null],
-    ['sem id', {}, { type: 'payment', data: {} }, null],
+    ['corpo', {}, { type: 'order', data: { id: 'ORD1' } }, 'ORD1'],
+    ['query', { type: 'order', 'data.id': 'ORD1' }, undefined, 'ORD1'],
+    ['id numérico', {}, { type: 'order', data: { id: 123 } }, '123'],
+    ['tópico payment', {}, { type: 'payment', data: { id: '1' } }, null],
+    ['IPN antigo', { topic: 'payment', id: '1' }, undefined, null],
+    ['sem id', {}, { type: 'order', data: {} }, null],
   ])('%s', (_caso, query, corpo, esperado) => {
     expect(
       lerAvisoMercadoPago(

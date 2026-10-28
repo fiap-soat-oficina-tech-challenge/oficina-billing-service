@@ -28,8 +28,8 @@ import {
 } from '../ports/publicador-respostas';
 import { traduzirErroDominio } from '../shared/traduzir-erro-dominio';
 
-/** Por quanto tempo o link de pagamento aceita pagamento. */
-export const PRAZO_DO_LINK_EM_HORAS = 72;
+/** Por quanto tempo o QR Code aceita pagamento. */
+export const PRAZO_DA_COBRANCA_EM_HORAS = 72;
 
 export type Decisao =
   { aprovado: true } | { aprovado: false; motivo: string | null };
@@ -39,10 +39,11 @@ export type Decisao =
  * pelo sistema externo (webhook com token). As duas origens seguem a mesma
  * regra; só muda o campo `origem` da resposta para a Saga.
  *
- * Aprovar cria o link de pagamento no Mercado Pago **antes** de mudar o
- * orçamento. Se o Mercado Pago falhar, nada muda: o orçamento continua
+ * Aprovar cria a cobrança no Mercado Pago (QR Code dinâmico) **antes** de
+ * mudar o orçamento. Se o Mercado Pago falhar, nada muda: o orçamento continua
  * aguardando aprovação, nenhuma mensagem é publicada e a rota responde 503
- * (docs/contratos.md). A cobrança só existe depois da aprovação.
+ * (docs/contratos.md). A cobrança só existe depois da aprovação, e uma nova
+ * tentativa de aprovação devolve a mesma cobrança.
  */
 @Injectable()
 export class DecidirOrcamentoUseCase {
@@ -112,10 +113,11 @@ export class DecidirOrcamentoUseCase {
     let resposta: { tipo: string; payload: Record<string, unknown> };
 
     if (decisao.aprovado) {
-      const expiraEm = new Date(
-        agora.getTime() + PRAZO_DO_LINK_EM_HORAS * 60 * 60 * 1000,
+      mudancas.cobranca = await this.gateway.criarCobranca(
+        orcamento,
+        PRAZO_DA_COBRANCA_EM_HORAS,
+        agora,
       );
-      mudancas.cobranca = await this.gateway.criarCobranca(orcamento, expiraEm);
       resposta = {
         tipo: RESPOSTAS.orcamentoAprovado,
         payload: { orcamentoId: orcamento.id, origem },
@@ -156,7 +158,7 @@ export class DecidirOrcamentoUseCase {
       },
     );
 
-    if (decisao.aprovado) await this.notificador.enviarLinkPagamento(decidido);
+    if (decisao.aprovado) await this.notificador.enviarCobranca(decidido);
     return decidido;
   }
 }

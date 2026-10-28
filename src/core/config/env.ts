@@ -28,9 +28,11 @@ export function validateEnv(): void {
   must('BILLING_COMMANDS_QUEUE_URL');
   must('SAGA_REPLIES_QUEUE_URL');
 
-  // Mercado Pago. MERCADO_PAGO_API_URL (padrão: a API real) só muda nos testes,
-  // que usam um simulador. MERCADO_PAGO_NOTIFICATION_URL e o e-mail
-  // (MAIL_LAMBDA_URL e MAIL_LAMBDA_TOKEN) são opcionais: sem eles, o serviço
-  // funciona, mas o Mercado Pago não avisa os pagamentos e nenhum e-mail sai.
+  // Mercado Pago (QR Code): o token e o caixa a que as cobranças ficam ligadas.
+  // MERCADO_PAGO_API_URL (padrão: a API real) só muda nos testes, que usam um
+  // simulador. O e-mail (MAIL_LAMBDA_URL e MAIL_LAMBDA_TOKEN) é opcional: sem
+  // ele, o serviço funciona, mas nenhum e-mail sai. O endereço do aviso de
+  // pagamento não é variável: fica no painel do Mercado Pago (README).
   must('MERCADO_PAGO_ACCESS_TOKEN');
+  must('MERCADO_PAGO_CAIXA_ID');
 }

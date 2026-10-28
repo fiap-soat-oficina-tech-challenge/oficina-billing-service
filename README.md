@@ -34,8 +34,8 @@ Microsserviço do Tech Challenge da Fase 4 (FIAP SOAT). A oficina mecânica foi 
 
 - Gerar o orçamento da OS e enviá-lo ao cliente para aprovação
 - Registrar a aprovação ou a recusa, feita pelo cliente ou pelo sistema externo
-- Cobrar pelo Mercado Pago (Checkout Pro), confirmar os pagamentos e estornar quando a Saga precisa compensar
-- Avisar a Saga de cada resultado: orçamento enviado, aprovado ou recusado, e pagamento confirmado, recusado ou estornado
+- Cobrar pelo Mercado Pago (QR Code dinâmico), confirmar os pagamentos e estornar quando a Saga precisa compensar
+- Avisar a Saga de cada resultado: orçamento enviado, aprovado ou recusado, e pagamento confirmado ou estornado
 
 O serviço **não** muda o status da OS. Ele só avisa o OS Service, e o orquestrador decide.
 
@@ -48,7 +48,7 @@ flowchart LR
     RESP[["SQS<br/>oficina-os-saga-replies"]]
     BI["Billing Service"]
     DB[("PostgreSQL<br/>oficina-billing-db")]
-    MP["Mercado Pago<br/>(Checkout Pro)"]
+    MP["Mercado Pago<br/>(QR Code dinâmico)"]
     MAIL["Lambda /mail"]
     CLI["Cliente<br/>(JWT do CPF)"]
     EXT["Sistema externo<br/>(x-webhook-token)"]
@@ -60,16 +60,16 @@ flowchart LR
     CLI -->|"aprovar · recusar · consultar"| BI
     EXT -->|"POST /billing/webhooks/orcamento"| BI
     FUNC -->|"consultar orçamentos e pagamentos"| BI
-    BI -->|"cria o link · consulta · expira · estorna"| MP
-    MP -->|"aviso de pagamento (webhook)"| BI
-    BI -->|"orçamento e link de pagamento"| MAIL
-    BI -->|"OrcamentoEnviado · OrcamentoAprovado · OrcamentoRecusado<br/>PagamentoConfirmado · PagamentoRecusado · PagamentoEstornado<br/>GeracaoOrcamentoFalhou"| RESP
+    BI -->|"cria a cobrança · consulta · cancela · estorna"| MP
+    MP -->|"aviso da order (webhook)"| BI
+    BI -->|"orçamento e QR Code de pagamento"| MAIL
+    BI -->|"OrcamentoEnviado · OrcamentoAprovado · OrcamentoRecusado<br/>PagamentoConfirmado · PagamentoEstornado<br/>GeracaoOrcamentoFalhou"| RESP
     RESP --> OS
 ```
 
 1. Quando o mecânico conclui o diagnóstico, o OS Service publica `GerarOrcamento` com uma cópia das linhas da OS (serviços e itens, com os preços daquele momento). O Billing cria o orçamento, responde `OrcamentoEnviado` e manda o orçamento por e-mail ao cliente.
-2. O cliente aprova ou recusa pela API, com o token do CPF. O sistema externo também pode decidir, pelo webhook. Na aprovação, o Billing cria o link de pagamento no Mercado Pago, devolve o link na resposta e o envia por e-mail.
-3. O cliente paga pelo link. O Mercado Pago avisa o webhook do Billing, que consulta o pagamento na API do Mercado Pago e responde `PagamentoConfirmado` ou `PagamentoRecusado`. Uma recusa não encerra nada: o link continua valendo e o cliente pode tentar de novo com outro cartão ou outro meio. A OS só avança quando um pagamento é confirmado.
+2. O cliente aprova ou recusa pela API, com o token do CPF. O sistema externo também pode decidir, pelo webhook. Na aprovação, o Billing cria a cobrança no Mercado Pago (uma order de QR Code dinâmico), devolve o QR Code na resposta e o envia por e-mail, como imagem.
+3. O cliente paga lendo o QR Code com o app do Mercado Pago. O Mercado Pago avisa o webhook do Billing, que consulta a order na API do Mercado Pago e responde `PagamentoConfirmado`. Uma recusa não encerra nada: a order continua aberta, o Mercado Pago nem avisa, e o cliente paga de novo pelo mesmo QR Code, com outro cartão ou outro meio. A OS só avança quando um pagamento é confirmado.
 4. Se a Saga precisar desfazer, o OS Service manda `CancelarOrcamento` (o funcionário cancelou a OS antes do pagamento) ou `EstornarPagamento` (o reparo falhou depois do pagamento).
 
 ## Ciclo do orçamento e do pagamento
@@ -77,11 +77,11 @@ flowchart LR
 ```mermaid
 stateDiagram-v2
     [*] --> AGUARDANDO_APROVACAO: GerarOrcamento
-    AGUARDANDO_APROVACAO --> APROVADO: aprovar (cria o link)
+    AGUARDANDO_APROVACAO --> APROVADO: aprovar (cria a cobrança)
     AGUARDANDO_APROVACAO --> RECUSADO: recusar
     APROVADO --> PAGO: pagamento aprovado
     AGUARDANDO_APROVACAO --> CANCELADO: CancelarOrcamento
-    APROVADO --> CANCELADO: CancelarOrcamento (expira o link)
+    APROVADO --> CANCELADO: CancelarOrcamento (cancela a cobrança)
     PAGO --> CANCELADO: CancelarOrcamento ou EstornarPagamento (estorna)
     RECUSADO --> [*]
     CANCELADO --> [*]
@@ -89,12 +89,11 @@ stateDiagram-v2
 
 As transições ficam em [`domain/orcamento.ts`](src/modules/orcamento/domain/orcamento.ts). Ação fora do ciclo, como aprovar um orçamento já recusado, responde 409 e não publica nada.
 
-Cada pagamento informado pelo Mercado Pago vira um registro, identificado pelo id do próprio Mercado Pago:
+Cada cobrança paga vira um registro de pagamento, identificado pelo id da order no Mercado Pago (`ORD...`). Tentativas recusadas não viram registro: o Mercado Pago não as avisa, e a order continua aberta.
 
 | Status | Quando |
 |---|---|
-| `APROVADO` | pagamento aprovado que quitou o orçamento |
-| `RECUSADO` | tentativa recusada (cartão negado, por exemplo); fica no histórico, e o cliente pode tentar de novo pelo mesmo link |
+| `APROVADO` | pagamento que quitou o orçamento |
 | `ESTORNADO` | devolvido ao cliente, seja por compensação da Saga, seja porque chegou depois do cancelamento |
 
 ## Fluxos da Saga
@@ -112,13 +111,13 @@ sequenceDiagram
     BI-->>OS: OrcamentoEnviado
     BI-->>CL: e-mail com o orçamento
     CL->>BI: POST /billing/orcamentos/{id}/aprovar
-    BI->>MP: POST /checkout/preferences
-    MP-->>BI: link de pagamento
+    BI->>MP: POST /v1/orders (QR Code dinâmico)
+    MP-->>BI: order com o QR Code
     BI-->>OS: OrcamentoAprovado
-    BI-->>CL: link (resposta e e-mail)
-    CL->>MP: paga pelo link
-    MP->>BI: aviso (webhook, tópico payment)
-    BI->>MP: GET /v1/payments/{id}
+    BI-->>CL: QR Code (resposta e e-mail)
+    CL->>MP: paga lendo o QR Code no app
+    MP->>BI: aviso (webhook, tópico order)
+    BI->>MP: GET /v1/orders/{id}
     BI-->>OS: PagamentoConfirmado
 ```
 
@@ -130,8 +129,8 @@ O que o Billing faz em cada falha. A coluna **Compensação** é o que acontece 
 | Comando com dados inválidos ou totais que não fecham | Billing, no `GerarOrcamento` | não cria o orçamento | `GeracaoOrcamentoFalhou` (`COMANDO_INVALIDO: ...`) |
 | Cliente ou sistema externo recusa | Billing | marca `RECUSADO` | `OrcamentoRecusado` |
 | Mercado Pago fora na aprovação | Billing | nada muda; a rota responde 503 | — |
-| Pagamento recusado | Mercado Pago | registra a tentativa; o orçamento continua `APROVADO` e o link continua valendo para nova tentativa | `PagamentoRecusado` (informativo: a OS continua aguardando pagamento) |
-| Funcionário cancela a OS esperando o cliente (desistência, link expirado) | OS (`CancelarOrcamento`) | cancela; se já havia link, **expira o link**; se já estava pago, **estorna** | `PagamentoEstornado`, só se estornou |
+| Pagamento recusado | Mercado Pago (no app) | nada: o Mercado Pago não avisa, a order continua aberta e o cliente paga de novo pelo mesmo QR Code | — (a OS continua aguardando pagamento) |
+| Funcionário cancela a OS esperando o cliente (desistência, QR Code expirado) | OS (`CancelarOrcamento`) | cancela; se já havia cobrança, **cancela a order**; se já estava pago, **estorna** | `PagamentoEstornado`, só se estornou |
 | Reparo falhou depois do pagamento | OS (`EstornarPagamento`) | **estorna** e cancela o orçamento | `PagamentoEstornado` |
 | Pagamento aprovado depois do cancelamento | Mercado Pago | **estorna** | `PagamentoEstornado` |
 
@@ -159,8 +158,7 @@ Um tipo desconhecido é descartado com um log de aviso.
 | `GeracaoOrcamentoFalhou` | comando sem linhas ou inválido | `{ motivo }` |
 | `OrcamentoAprovado` | aprovação do cliente ou do sistema externo | `{ orcamentoId, origem }` |
 | `OrcamentoRecusado` | recusa | `{ orcamentoId, origem, motivo }` |
-| `PagamentoConfirmado` | pagamento aprovado no Mercado Pago | `{ pagamentoId, valor, pagoEm }` |
-| `PagamentoRecusado` | pagamento recusado no Mercado Pago; informativo, porque o cliente pode tentar de novo | `{ detalhe }` |
+| `PagamentoConfirmado` | order paga no Mercado Pago | `{ pagamentoId, valor, pagoEm }` (`pagamentoId` é o id da order) |
 | `PagamentoEstornado` | estorno feito | `{ pagamentoId, estornadoEm }` |
 
 ## API REST
@@ -170,44 +168,57 @@ Prefixo `/billing`. A documentação interativa (Swagger) fica em `/billing/api`
 | Método e rota | Quem chama | O que faz |
 |---|---|---|
 | `GET /billing/orcamentos?osId={osId}` | funcionário ou cliente dono | Lista os orçamentos da OS (no máximo um). O cliente só vê o próprio; para os outros, a lista vem vazia |
-| `GET /billing/orcamentos/{id}` | funcionário ou cliente dono | Consulta um orçamento; depois da aprovação, inclui `linkPagamento` e `linkExpiraEm`. Orçamento de outro cliente é 404 |
-| `POST /billing/orcamentos/{id}/aprovar` | cliente dono | Aprova, cria o link no Mercado Pago e devolve o orçamento com o `linkPagamento`. 409 se não estiver aguardando aprovação; 503 se o Mercado Pago falhar (nada muda) |
+| `GET /billing/orcamentos/{id}` | funcionário ou cliente dono | Consulta um orçamento; depois da aprovação, inclui o `qrCode`: `conteudo` (EMVCo), `imagem` (PNG em data URL) e `expiraEm`. Orçamento de outro cliente é 404 |
+| `POST /billing/orcamentos/{id}/aprovar` | cliente dono | Aprova, cria a cobrança no Mercado Pago e devolve o orçamento com o `qrCode`. 409 se não estiver aguardando aprovação; 503 se o Mercado Pago falhar (nada muda) |
 | `POST /billing/orcamentos/{id}/recusar` | cliente dono | Recusa, com `{ motivo }` opcional |
 | `POST /billing/webhooks/orcamento` | sistema externo (`x-webhook-token`) | Aprovação externa: `{ codigoOS, aprovado, motivo? }`. É o mesmo corpo do webhook do OS na Fase 3; só a URL mudou |
-| `POST /billing/webhooks/mercado-pago` | Mercado Pago (rota pública) | Aviso de pagamento. Responde `{ resultado }`: `PAGAMENTO_CONFIRMADO`, `PAGAMENTO_RECUSADO`, `PAGAMENTO_ESTORNADO`, `JA_PROCESSADO` ou `IGNORADO` |
-| `GET /billing/pagamentos?osId={osId}` | funcionário | Pagamentos, tentativas recusadas e estornos da OS |
+| `POST /billing/webhooks/mercado-pago` | Mercado Pago (rota pública) | Aviso da order (tópico `order`). Responde `{ resultado }`: `PAGAMENTO_CONFIRMADO`, `PAGAMENTO_ESTORNADO`, `JA_PROCESSADO` ou `IGNORADO` |
+| `GET /billing/pagamentos?osId={osId}` | funcionário | Pagamento e estorno da OS |
 | `GET /billing/health` e `/billing/health/ready` | Kubernetes e ALB | Liveness (o processo responde) e readiness (o banco responde) |
 
 O serviço não emite token. Ele valida o mesmo JWT do OS Service (funcionário, login por e-mail) e da Lambda de autenticação (cliente, por CPF), com o segredo `JWT_SECRET`. Sem `@Roles` na rota, só o funcionário passa.
 
 ## Integração com o Mercado Pago
 
-O produto é o **Checkout Pro**, em sandbox. O adaptador está em [`infra/mercado-pago/mercado-pago.gateway.ts`](src/modules/orcamento/infra/mercado-pago/mercado-pago.gateway.ts) e usa a API REST direto, com `fetch` e sem SDK:
+O produto é o **QR Code dinâmico** ([Orders API](https://www.mercadopago.com.br/developers/pt/docs/qr-code/overview)), com credenciais de teste: uma order por orçamento, com um QR Code único, pago pelo cliente no app do Mercado Pago. O adaptador está em [`infra/mercado-pago/mercado-pago.gateway.ts`](src/modules/orcamento/infra/mercado-pago/mercado-pago.gateway.ts) e usa a API REST direto, com `fetch` e sem SDK:
 
 | Operação | Chamada | Quando |
 |---|---|---|
-| Criar o link | `POST /checkout/preferences` com `external_reference` = id do orçamento, `notification_url` e prazo (`expiration_date_to`, 72 h) | na aprovação |
-| Consultar o pagamento | `GET /v1/payments/{id}` | a cada aviso do webhook |
-| Expirar o link | `PUT /checkout/preferences/{id}` com o prazo no passado | `CancelarOrcamento` com o orçamento aprovado |
-| Estornar | `POST /v1/payments/{id}/refunds` com `X-Idempotency-Key: estorno-{id}` | compensações |
+| Criar a cobrança | `POST /v1/orders` com `type: qr`, `config.qr.mode: dynamic` no caixa `MERCADO_PAGO_CAIXA_ID`, `external_reference` = id do orçamento e prazo (`expiration_time: PT72H`); o QR Code vem em `type_response.qr_data` | na aprovação |
+| Consultar | `GET /v1/orders/{id}` (`processed` = paga) | a cada aviso do webhook |
+| Cancelar | `POST /v1/orders/{id}/cancel` | `CancelarOrcamento` com o orçamento aprovado |
+| Estornar | `POST /v1/orders/{id}/refund`, sem corpo (estorno total) | compensações |
+
+A imagem do QR Code (PNG) é gerada pelo próprio serviço a partir do `qr_data`, com a biblioteca `qrcode`: vai na resposta da API (data URL) e no e-mail, embutida no HTML pela Lambda `/mail`.
 
 Como o adaptador se protege:
 
-- **O aviso nunca é a fonte da verdade.** O webhook só traz o id do pagamento. Situação, valor e orçamento vêm da consulta à API, então um aviso forjado não confirma pagamento nenhum. Por isso a rota pode ser pública.
+- **O aviso nunca é a fonte da verdade.** O webhook só traz o id da order. Situação, valor e orçamento vêm da consulta à API, então um aviso forjado não confirma pagamento nenhum. Por isso a rota pode ser pública, e a assinatura `x-signature` não é conferida.
 - **Timeout e nova tentativa.** Cada chamada tem timeout de 10 s e uma nova tentativa em erro de rede, 429 ou 5xx. O pior caso (cerca de 20 s) fica abaixo dos 30 s do API Gateway e dos 60 s de visibilidade da fila. Erro 4xx não é repetido, porque repetir não resolve.
-- **Estorno idempotente.** A chave de idempotência é fixa por pagamento. Se o estorno for repetido (a gravação falhou depois do estorno e a mensagem voltou para a fila), o Mercado Pago não devolve o dinheiro duas vezes.
-- **Pagamento desconhecido.** Um id que o Mercado Pago não conhece, como o aviso de teste do painel, é ignorado com 200, para não ser reenviado à toa.
+- **Idempotência em toda escrita.** O `X-Idempotency-Key` é fixo: `cobranca-{orçamento}`, `cancelamento-{order}` e `estorno-{order}`. Uma aprovação repetida devolve a mesma order, e um estorno repetido não devolve o dinheiro duas vezes. Passadas as 24 h da chave, um estorno repetido volta 409; se a order já está estornada, o adaptador trata como feito.
+- **Cancelar o que já foi pago não é erro.** O Mercado Pago só cancela order aberta e responde 409 `cannot_cancel_order` para uma paga, expirada ou cancelada. O cancelamento segue, e um pagamento feito no meio chega pelo webhook e cai no estorno automático. Outro 409 (`instore_order_locked_error`, com um pagamento em andamento) volta para a fila e é repetido.
+- **Order desconhecida.** O aviso simulado do painel manda um id que não existe (404, ou 400 pelo formato). É ignorado com 200, para não ser reenviado à toa.
 
-O Mercado Pago não avisa quando um link expira. Por isso uma OS parada esperando pagamento é cancelada pelo funcionário no OS Service, e o cancelamento chega aqui como `CancelarOrcamento`.
+Uma recusa não muda a order nem gera aviso; o cliente paga de novo pelo mesmo QR Code até ele expirar. Uma order que expira gera aviso (`order.expired`), mas o Billing não age sozinho: uma OS parada esperando pagamento é cancelada pelo funcionário no OS Service, e o cancelamento chega aqui como `CancelarOrcamento`.
 
 Localmente e nos testes, a API é substituída pelo [simulador](mercado-pago-simulador/README.md) (WireMock), apontado por `MERCADO_PAGO_API_URL`. O código é o mesmo.
+
+### Configuração da conta de teste (uma vez)
+
+Conferido contra a API real em 28/10/2026. A documentação do Mercado Pago diverge do comportamento em três pontos, marcados abaixo.
+
+1. **Aplicação.** Em [Suas integrações](https://www.mercadopago.com.br/developers/panel/app), criar a aplicação escolhendo a solução **QR Code**. As credenciais de teste e as contas de teste (vendedor e comprador) são criadas junto.
+2. **Token.** O Access Token de teste (`APP_USR-...`, em *Credenciais de teste*) vai para o SSM, em `billing/MERCADO_PAGO_ACCESS_TOKEN`. Ele pertence ao **vendedor de teste**, e as orders são criadas por uma aplicação oculta dele (`TestApp-...`), não pela aplicação da conta pessoal.
+3. **Loja e caixa.** Criados pela API com o token, no `user_id` das credenciais de teste: `POST /users/{user_id}/stores` (com `location`) e `POST /v2/pos` com `external_store_id`, `external_id` e `config.qr.operating_mode: pdv`. O `external_id` do caixa é o `MERCADO_PAGO_CAIXA_ID` (no ambiente, `OFICINA01CAIXA01`). *O guia de teste pede `fixed_amount=true` no caixa; a `/v2/pos` recusa o campo.*
+4. **Webhook.** Entrar no painel **logado como o vendedor de teste** (usuário e senha em *Contas de teste* da aplicação), abrir a **TestApp**, *Webhooks → Configurar notificações*, aba **Modo de teste**: URL `<API_GATEWAY_URL>/billing/webhooks/mercado-pago`, evento **Order (Mercado Pago)**. *A documentação manda usar o Modo produção, por onde nenhum aviso chegou; e o "Simular notificação" do Modo de teste responde 200 sem chamar a URL — só um pagamento de verdade confirma a configuração.* O endereço do API Gateway muda quando a plataforma é recriada, e então o webhook precisa ser atualizado.
+5. **Pagamento de teste.** App do Mercado Pago no celular, logado com o **comprador de teste**, lendo o QR Code. Cartões da conta de teste: Mastercard `5480 8328 0103 3311` e Visa `4235 4777 2802 5682` aprovam; Elo Débito `5067 7667 8388 8311` recusa (a order continua aberta). O saldo da conta também paga.
 
 ## Garantias
 
 - **Banco próprio.** Orçamentos e pagamentos ficam no PostgreSQL deste serviço. O cliente e as linhas chegam no comando, e o serviço nunca consulta o banco do OS Service.
 - **Comando repetido não duplica nada.** O SQS entrega cada mensagem pelo menos uma vez, então o serviço confere o estado e usa chaves naturais (`docs/contratos.md`, seção 1):
   - uma OS tem um só orçamento (`osId` único), então um `GerarOrcamento` repetido é ignorado;
-  - um pagamento é registrado uma vez (a chave é o id do Mercado Pago), então um aviso repetido responde `JA_PROCESSADO`;
+  - um pagamento é registrado uma vez (a chave é o id da order), então um aviso repetido responde `JA_PROCESSADO`;
   - um pagamento só é estornado se ainda estiver `APROVADO`, então um `EstornarPagamento` repetido não faz nada;
   - um `CancelarOrcamento` para orçamento já `RECUSADO` ou `CANCELADO` não faz nada.
 - **Gravar e publicar na mesma transação.** Quem grava e publica faz as duas coisas dentro de uma transação do banco, publicando antes do commit ([`domain/repository/transacao.ts`](src/modules/orcamento/domain/repository/transacao.ts)). Se a publicação falha, nada fica gravado. É a alternativa enxuta ao outbox transacional, definida nos contratos.
@@ -223,9 +234,9 @@ Schema em [`prisma/schema.prisma`](prisma/schema.prisma); migrations em `prisma/
 
 | Tabela | Conteúdo | Chaves e índices |
 |---|---|---|
-| `Orcamento` | OS (id e código), `correlationId` do fluxo, cliente (cópia), totais, status, decisão (origem e motivo), cobrança (preferência, link e prazo), datas de cada etapa | `id`; `osId` e `codigoOS` únicos; índice por `clienteId` |
+| `Orcamento` | OS (id e código), `correlationId` do fluxo, cliente (cópia), totais, status, decisão (origem e motivo), cobrança (id da order, conteúdo do QR Code e prazo), datas de cada etapa | `id`; `osId` e `codigoOS` únicos; índice por `clienteId` |
 | `LinhaOrcamento` | serviços e itens do orçamento (`tipo`), com nome, preço unitário, quantidade e subtotal da época, na ordem em que chegaram | índice por `orcamentoId` |
-| `Pagamento` | pagamentos informados pelo Mercado Pago: status, valor, `status_detail`, datas e motivo do estorno | `id` = id do Mercado Pago; índices por `osId` e `orcamentoId` |
+| `Pagamento` | a cobrança paga, como o Mercado Pago a informou: status, valor, `status_detail`, datas e motivo do estorno | `id` = id da order; índices por `osId` e `orcamentoId` |
 
 **Por que PostgreSQL.** Orçamento e pagamento são dinheiro, e o serviço precisa de:
 
@@ -280,7 +291,7 @@ A base comum (`common/`, `core/`, `auth`, `health`) é a mesma nos três serviç
 
 ## Tecnologias
 
-NestJS 11 · TypeScript · Node.js 24 · PostgreSQL 17 (Amazon RDS) · Prisma 7 · Amazon SQS · AWS SDK v3 · Mercado Pago (Checkout Pro, API REST) · Jest · logs JSON com `nestjs-pino` e `correlationId` · agente New Relic · Docker · LocalStack · WireMock · Kubernetes (EKS) · Terraform · GitHub Actions
+NestJS 11 · TypeScript · Node.js 24 · PostgreSQL 17 (Amazon RDS) · Prisma 7 · Amazon SQS · AWS SDK v3 · Mercado Pago (QR Code dinâmico, Orders API) · `qrcode` · Jest · logs JSON com `nestjs-pino` e `correlationId` · agente New Relic · Docker · LocalStack · WireMock · Kubernetes (EKS) · Terraform · GitHub Actions
 
 ## Rodando localmente
 
@@ -304,13 +315,13 @@ Com o compose no ar, [`scripts/teste-ponta-a-ponta.sh`](scripts/teste-ponta-a-po
 bash scripts/teste-ponta-a-ponta.sh
 ```
 
-São 42 verificações em cinco cenários:
+São 45 verificações em cinco cenários:
 
-1. caminho feliz até o estorno: orçamento, aprovação, pagamento e falha no reparo;
+1. caminho feliz até o estorno: orçamento, aprovação com o QR Code (conteúdo e imagem), pagamento e falha no reparo;
 2. recusa pelo cliente;
-3. aprovação externa, pagamento recusado e nova tentativa aprovada pelo mesmo link;
-4. cancelamento pelo funcionário com o link expirado, e um pagamento que chega depois e é estornado;
-5. OS sem linhas, Mercado Pago fora na aprovação e aviso de pagamento desconhecido.
+3. aprovação externa, tentativa recusada (a order continua aberta) e pagamento pelo mesmo QR Code;
+4. cancelamento pelo funcionário com a order cancelada no Mercado Pago, e um pagamento que chega depois e é estornado;
+5. OS sem linhas, Mercado Pago fora na aprovação, aviso de order desconhecida e de outro tópico.
 
 O script também confere a idempotência: comando repetido, aviso repetido e estorno repetido.
 
@@ -321,14 +332,14 @@ npm test            # testes unitários
 npm run test:cov    # com cobertura; falha abaixo de 80% de linhas e instruções
 ```
 
-Resultado atual: **220 testes, 97% de linhas** (97,2% de instruções, 85,1% de branches, 98,3% de funções). Os dublês usados pelos testes (`testes-de-apoio.ts`) ficam fora da conta, para não inflar o número.
+Resultado atual: **230 testes, 97% de linhas** (97,3% de instruções, 85,3% de branches, 98,3% de funções). Os dublês usados pelos testes (`testes-de-apoio.ts`) ficam fora da conta, para não inflar o número.
 
 | Camada | O que os testes cobrem |
 |---|---|
 | Domínio | ciclo do orçamento (transições válidas e recusadas) e contas em centavos |
 | Casos de uso | cada fluxo da tabela [Fluxos da Saga](#fluxos-da-saga), com dublês em memória que reproduzem o banco (rollback quando a transação falha, chave única e gravação condicional): idempotência, corridas (pagamento × cancelamento), falha na publicação, Mercado Pago fora |
-| Infraestrutura | chamadas ao Mercado Pago (corpo, headers, timeout e novas tentativas), e-mails, mapeamento do Prisma |
-| Interface | rotas, leitura do aviso do Mercado Pago nos formatos webhook e IPN, e roteamento dos comandos |
+| Infraestrutura | chamadas ao Mercado Pago (corpo, headers, idempotência, os 409 do cancelamento e do estorno, timeout e novas tentativas), e-mails com o QR Code embutido e o HTML escapado, mapeamento do Prisma |
+| Interface | rotas, QR Code na resposta (imagem PNG), leitura do aviso do Mercado Pago (tópico `order`, no corpo ou na query) e roteamento dos comandos |
 
 O CI (`.github/workflows/ci.yml`) roda lint, testes com cobertura e build em todo PR; o check `Build & Test` é obrigatório para o merge na `main`. No push na `develop` e na `main`, o mesmo CI roda como primeiro estágio do [deploy](#deploy).
 
@@ -342,10 +353,9 @@ O CI (`.github/workflows/ci.yml`) roda lint, testes com cobertura e build em tod
 | `AWS_REGION` | Região da AWS |
 | `BILLING_COMMANDS_QUEUE_URL` | Fila consumida |
 | `SAGA_REPLIES_QUEUE_URL` | Fila das respostas para o orquestrador |
-| `MERCADO_PAGO_ACCESS_TOKEN` | Access Token (de teste) da aplicação do Checkout Pro |
+| `MERCADO_PAGO_ACCESS_TOKEN` | Access Token (de teste) da aplicação de QR Code |
+| `MERCADO_PAGO_CAIXA_ID` | `external_id` do caixa a que as cobranças ficam ligadas ([configuração](#configuração-da-conta-de-teste-uma-vez)) |
 | `MERCADO_PAGO_API_URL` | Opcional. Padrão: `https://api.mercadopago.com`; nos testes, o simulador |
-| `MERCADO_PAGO_NOTIFICATION_URL` | Opcional. URL pública do webhook; sem ela, o Mercado Pago não avisa os pagamentos |
-| `MERCADO_PAGO_SANDBOX` | `true` (padrão) devolve o link de sandbox; `false`, o de produção |
 | `MAIL_LAMBDA_URL` e `MAIL_LAMBDA_TOKEN` | Opcionais. Lambda de e-mail; sem elas, nenhum e-mail é enviado |
 | `AWS_ENDPOINT_URL` | Só localmente: aponta para o LocalStack |
 
@@ -390,8 +400,9 @@ A infraestrutura AWS do serviço (fila, banco, repositório de imagens, parâmet
 ## Decisões e limites
 
 - **Um orçamento por OS.** Recusa e cancelamento encerram a OS na Saga, então nunca há um segundo orçamento. O `osId` único é a chave da idempotência do `GerarOrcamento`.
-- **A cobrança só existe depois da aprovação.** O link é criado na aprovação, e não junto com o orçamento: o cliente não recebe cobrança de algo que ainda não aceitou.
-- **Pagamento recusado não encerra a OS** (contratos, versão 1.1). No Checkout Pro, o link continua aceitando pagamento depois de uma recusa, então o cliente pode tentar com outro cartão ou outro meio, e cada tentativa fica registrada. A OS só avança com um pagamento confirmado. Se o cliente desistir ou o link expirar, o funcionário cancela a OS, e o `CancelarOrcamento` expira o link. Um pagamento aprovado que ainda chegue depois disso é estornado.
-- **Link criado e não usado.** Se a gravação da aprovação falhar depois de o link ser criado no Mercado Pago, o link fica sem uso: ninguém o recebe, e ele expira no prazo. Não há compensação para isso porque não há cobrança.
-- **Assinatura do webhook do Mercado Pago não é validada.** A segurança vem da consulta do pagamento na API, que é a regra do contrato. A validação do header `x-signature` ficaria como extra.
+- **QR Code dinâmico, e não Checkout Pro.** O link "Acesse a documentação" do PDF do desafio aponta para a integração do QR Code dinâmico; o serviço segue esse produto. A troca ficou contida no adaptador da porta `GatewayPagamento`: a regra de negócio é a mesma.
+- **A cobrança só existe depois da aprovação.** A order é criada na aprovação, e não junto com o orçamento: o cliente não recebe cobrança de algo que ainda não aceitou.
+- **Pagamento recusado não encerra a OS** (contratos, versão 1.1). A order continua aberta depois de uma recusa, então o cliente pode pagar de novo pelo mesmo QR Code, com outro cartão ou outro meio. O Mercado Pago não avisa recusas, então elas não ficam registradas aqui nem chegam à Saga (contratos, versão 1.2). A OS só avança com um pagamento confirmado. Se o cliente desistir ou o QR Code expirar, o funcionário cancela a OS, e o `CancelarOrcamento` cancela a order. Um pagamento aprovado que ainda chegue depois disso é estornado.
+- **Cobrança criada e não usada.** Se a gravação da aprovação falhar depois de a order ser criada, uma nova aprovação devolve a mesma order (chave de idempotência por orçamento, válida por 24 h). Sem nova aprovação, ninguém recebe o QR Code e a order expira no prazo. Não há compensação para isso porque não há cobrança.
+- **Assinatura do webhook do Mercado Pago não é validada.** A segurança vem da consulta da order na API, que é a regra do contrato. A validação do header `x-signature` ficaria como extra.
 - **Sem tabela de mensagens processadas e sem outbox.** A idempotência vem do estado e das chaves naturais, e a consistência entre gravar e publicar vem da publicação dentro da transação, como definido nos contratos.

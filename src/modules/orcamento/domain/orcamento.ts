@@ -32,10 +32,15 @@ export interface ClienteDoOrcamento {
   email: string | null;
 }
 
-/** Link de pagamento do Mercado Pago (Checkout Pro), criado na aprovação. */
+/**
+ * Cobrança do orçamento no Mercado Pago, criada na aprovação: uma order de QR
+ * Code dinâmico, paga pelo cliente no app do Mercado Pago.
+ */
 export interface Cobranca {
-  preferenciaId: string;
-  linkPagamento: string;
+  /** Id da order no Mercado Pago (`ORD...`). */
+  id: string;
+  /** Conteúdo do QR Code (padrão EMVCo), de onde sai a imagem. */
+  qrCode: string;
   expiraEm: Date;
 }
 

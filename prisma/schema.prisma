@@ -36,7 +36,6 @@ enum TipoLinhaOrcamento {
 
 enum StatusPagamento {
   APROVADO
-  RECUSADO
   ESTORNADO
 }
 
@@ -60,10 +59,11 @@ model Orcamento {
   motivoRecusa       String?
   motivoCancelamento String?
 
-  /// Cobrança no Mercado Pago (Checkout Pro), criada na aprovação.
-  preferenciaId String?
-  linkPagamento String?
-  linkExpiraEm  DateTime?
+  /// Cobrança no Mercado Pago (QR Code dinâmico), criada na aprovação: o id
+  /// da order, o conteúdo do QR Code (EMVCo) e o prazo para pagar.
+  cobrancaId       String?
+  qrCode           String?
+  cobrancaExpiraEm DateTime?
 
   criadoEm     DateTime
   atualizadoEm DateTime
@@ -97,16 +97,16 @@ model LinhaOrcamento {
   @@index([orcamentoId])
 }
 
-/// Pagamento no Mercado Pago. O id é o do próprio Mercado Pago: o webhook
-/// repete avisos, e a chave primária garante que cada pagamento é tratado uma
-/// vez só.
+/// Pagamento da cobrança no Mercado Pago. O id é o da order paga (ORD...): o
+/// webhook repete avisos, e a chave primária garante que cada pagamento é
+/// tratado uma vez só.
 model Pagamento {
   id            String          @id
   orcamentoId   String          @db.Uuid
   osId          String
   status        StatusPagamento
   valor         Decimal         @db.Decimal(10, 2)
-  /// status_detail do Mercado Pago (ex.: accredited, cc_rejected_other_reason).
+  /// status_detail da order no Mercado Pago (ex.: accredited).
   detalhe       String?
   registradoEm  DateTime
   pagoEm        DateTime?

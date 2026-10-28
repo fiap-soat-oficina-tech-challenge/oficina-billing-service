@@ -6,7 +6,7 @@ import {
 import { GatewayPagamentoError } from '../ports/gateway-pagamento';
 import {
   DecidirOrcamentoUseCase,
-  PRAZO_DO_LINK_EM_HORAS,
+  PRAZO_DA_COBRANCA_EM_HORAS,
 } from './decidir-orcamento.use-case';
 import {
   AGORA,
@@ -32,7 +32,7 @@ describe('DecidirOrcamentoUseCase', () => {
   }
 
   describe('aprovação pelo cliente', () => {
-    it('cria o link de pagamento, aprova, avisa a Saga e envia o link por e-mail', async () => {
+    it('cria a cobrança (QR Code), aprova, avisa a Saga e envia o QR Code por e-mail', async () => {
       const { useCase, orcamentos, publicador, gateway, notificador } =
         montar();
 
@@ -43,15 +43,17 @@ describe('DecidirOrcamentoUseCase', () => {
         AGORA,
       );
 
-      expect(gateway.chamadas).toEqual([`criarCobranca:${ORCAMENTO_ID}`]);
+      expect(gateway.chamadas).toEqual([
+        `criarCobranca:${ORCAMENTO_ID}:${PRAZO_DA_COBRANCA_EM_HORAS}h`,
+      ]);
       expect(aprovado).toMatchObject({
         status: 'APROVADO',
         origemDecisao: 'CLIENTE',
         decididoEm: AGORA,
         cobranca: {
-          preferenciaId: `pref-${ORCAMENTO_ID}`,
+          id: `ORD-${ORCAMENTO_ID}`,
           expiraEm: new Date(
-            AGORA.getTime() + PRAZO_DO_LINK_EM_HORAS * 3_600_000,
+            AGORA.getTime() + PRAZO_DA_COBRANCA_EM_HORAS * 3_600_000,
           ),
         },
       });
@@ -64,16 +66,13 @@ describe('DecidirOrcamentoUseCase', () => {
           payload: { orcamentoId: ORCAMENTO_ID, origem: 'CLIENTE' },
         }),
       ]);
-      expect(notificador.enviados).toEqual([`link:${ORCAMENTO_ID}`]);
+      expect(notificador.enviados).toEqual([`cobranca:${ORCAMENTO_ID}`]);
     });
 
     it('Mercado Pago fora: responde 503 e nada muda', async () => {
       const { useCase, orcamentos, publicador, gateway, notificador } =
         montar();
-      gateway.falha = new GatewayPagamentoError(
-        'criar o link de pagamento',
-        'HTTP 500',
-      );
+      gateway.falha = new GatewayPagamentoError('criar a cobrança', 'HTTP 500');
 
       await expect(
         useCase.peloCliente(ORCAMENTO_ID, CLIENTE_ID, { aprovado: true }),

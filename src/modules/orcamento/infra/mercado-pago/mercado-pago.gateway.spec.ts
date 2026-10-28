@@ -1,5 +1,8 @@
 import { GatewayPagamentoError } from '../../application/ports/gateway-pagamento';
-import { orcamentoDeExemplo } from '../../application/use-case/testes-de-apoio';
+import {
+  ORCAMENTO_ID,
+  orcamentoDeExemplo,
+} from '../../application/use-case/testes-de-apoio';
 import { MercadoPagoGateway, TENTATIVAS } from './mercado-pago.gateway';
 
 function resposta(status: number, corpo: unknown = {}): Response {
@@ -9,15 +12,20 @@ function resposta(status: number, corpo: unknown = {}): Response {
   });
 }
 
+const ORDER_ID = 'ORD01JV3AW3NFSTSTB669F41NACDX';
+const QR_DATA =
+  '00020101021243650016COM.MERCADOLIBRE02013063638f1192a5204000053039865802BR63041D4F';
+
 describe('MercadoPagoGateway', () => {
   let fetchMock: jest.SpyInstance;
-  const config = {
-    apiUrl: 'https://api.mp.test',
-    accessToken: 'TEST-token',
-    notificationUrl: 'https://api.oficina.test/billing/webhooks/mercado-pago',
-    usarSandbox: true,
-  };
-  const gateway = new MercadoPagoGateway(config, 0);
+  const gateway = new MercadoPagoGateway(
+    {
+      apiUrl: 'https://api.mp.test',
+      accessToken: 'APP_USR-token',
+      caixaId: 'OFICINA01CAIXA01',
+    },
+    0,
+  );
 
   beforeEach(() => {
     fetchMock = jest.spyOn(global, 'fetch');
@@ -31,174 +39,249 @@ describe('MercadoPagoGateway', () => {
   }
 
   describe('criarCobranca', () => {
-    it('cria a preferência do Checkout Pro e devolve o link de sandbox', async () => {
+    const agora = new Date('2026-10-20T14:00:00.000Z');
+
+    it('cria a order de QR Code dinâmico no caixa e devolve o QR Code', async () => {
       fetchMock.mockResolvedValue(
         resposta(201, {
-          id: 'pref-123',
-          init_point: 'https://www.mercadopago.com.br/checkout?pref=123',
-          sandbox_init_point:
-            'https://sandbox.mercadopago.com.br/checkout?pref=123',
+          id: ORDER_ID,
+          status: 'created',
+          type_response: { qr_data: QR_DATA },
         }),
       );
-      const expiraEm = new Date('2026-10-23T14:00:00.000Z');
       const orcamento = orcamentoDeExemplo({ valorTotal: 150.2 });
 
-      const cobranca = await gateway.criarCobranca(orcamento, expiraEm);
+      const cobranca = await gateway.criarCobranca(orcamento, 72, agora);
 
       expect(cobranca).toEqual({
-        preferenciaId: 'pref-123',
-        linkPagamento: 'https://sandbox.mercadopago.com.br/checkout?pref=123',
-        expiraEm,
+        id: ORDER_ID,
+        qrCode: QR_DATA,
+        expiraEm: new Date('2026-10-23T14:00:00.000Z'),
       });
       const { url, init } = chamada();
-      expect(url).toBe('https://api.mp.test/checkout/preferences');
+      expect(url).toBe('https://api.mp.test/v1/orders');
       expect(init.method).toBe('POST');
       expect(init.headers).toMatchObject({
-        Authorization: 'Bearer TEST-token',
+        Authorization: 'Bearer APP_USR-token',
+        'X-Idempotency-Key': `cobranca-${ORCAMENTO_ID}`,
       });
       expect(JSON.parse(init.body as string)).toEqual({
-        items: [
-          {
-            id: orcamento.id,
-            title: 'Orçamento da OS OS-2026-000001 - Oficina SOAT',
-            quantity: 1,
-            unit_price: 150.2,
-            currency_id: 'BRL',
-          },
-        ],
-        external_reference: orcamento.id,
-        notification_url: config.notificationUrl,
-        expires: true,
-        expiration_date_to: '2026-10-23T14:00:00.000+00:00',
+        type: 'qr',
+        total_amount: '150.20',
+        description: 'Orçamento da OS OS-2026-000001 - Oficina SOAT',
+        external_reference: ORCAMENTO_ID,
+        expiration_time: 'PT72H',
+        config: {
+          qr: { external_pos_id: 'OFICINA01CAIXA01', mode: 'dynamic' },
+        },
+        transactions: { payments: [{ amount: '150.20' }] },
       });
     });
 
-    it('fora do sandbox usa o init_point', async () => {
-      fetchMock.mockResolvedValue(
-        resposta(201, {
-          id: 'p',
-          init_point: 'https://producao',
-          sandbox_init_point: 'https://sandbox',
-        }),
-      );
-      const producao = new MercadoPagoGateway(
-        { ...config, usarSandbox: false },
-        0,
-      );
+    it('resposta sem o QR Code vira GatewayPagamentoError', async () => {
+      fetchMock.mockResolvedValue(resposta(201, { id: ORDER_ID }));
 
-      const cobranca = await producao.criarCobranca(
-        orcamentoDeExemplo(),
-        new Date(),
+      await expect(
+        gateway.criarCobranca(orcamentoDeExemplo(), 72, agora),
+      ).rejects.toThrow(
+        'Falha no Mercado Pago ao criar a cobrança: resposta sem type_response.qr_data',
       );
-
-      expect(cobranca.linkPagamento).toBe('https://producao');
     });
   });
 
-  it('expirarCobranca põe o prazo da preferência no passado', async () => {
-    fetchMock.mockResolvedValue(resposta(200, {}));
+  describe('cancelarCobranca', () => {
+    it('cancela a order, sem corpo e com chave de idempotência', async () => {
+      fetchMock.mockResolvedValue(resposta(200, { status: 'canceled' }));
 
-    await gateway.expirarCobranca(
-      'pref-123',
-      new Date('2026-10-20T14:00:00.000Z'),
-    );
+      await gateway.cancelarCobranca(ORDER_ID);
 
-    const { url, init } = chamada();
-    expect(url).toBe('https://api.mp.test/checkout/preferences/pref-123');
-    expect(init.method).toBe('PUT');
-    expect(JSON.parse(init.body as string)).toEqual({
-      expires: true,
-      expiration_date_to: '2026-10-20T13:59:00.000+00:00',
+      const { url, init } = chamada();
+      expect(url).toBe(`https://api.mp.test/v1/orders/${ORDER_ID}/cancel`);
+      expect(init.method).toBe('POST');
+      expect(init.body).toBeUndefined();
+      expect(init.headers).toMatchObject({
+        'X-Idempotency-Key': `cancelamento-${ORDER_ID}`,
+      });
+    });
+
+    it('order que já não aceita pagamento (paga, expirada, cancelada) não é erro', async () => {
+      fetchMock.mockResolvedValue(
+        resposta(409, {
+          errors: [
+            {
+              code: 'cannot_cancel_order',
+              message:
+                "the order cannot be canceled because the current status, 'processed', doesn't allow cancelation",
+            },
+          ],
+        }),
+      );
+
+      await expect(gateway.cancelarCobranca(ORDER_ID)).resolves.toBeUndefined();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('order travada por um pagamento em andamento é erro (a fila repete)', async () => {
+      fetchMock.mockResolvedValue(
+        resposta(409, { errors: [{ code: 'instore_order_locked_error' }] }),
+      );
+
+      await expect(gateway.cancelarCobranca(ORDER_ID)).rejects.toThrow(
+        'Falha no Mercado Pago ao cancelar a cobrança: HTTP 409 (instore_order_locked_error)',
+      );
+    });
+
+    it('409 sem corpo de erro legível é erro', async () => {
+      fetchMock.mockResolvedValue(new Response('conflito', { status: 409 }));
+
+      await expect(gateway.cancelarCobranca(ORDER_ID)).rejects.toThrow(
+        'Falha no Mercado Pago ao cancelar a cobrança: HTTP 409',
+      );
     });
   });
 
   describe('consultarPagamento', () => {
-    it.each([
-      ['approved', 'APROVADO'],
-      ['rejected', 'RECUSADO'],
-      ['in_process', 'OUTRA'],
-      ['refunded', 'OUTRA'],
-    ])('traduz o status %s para %s', async (status, situacao) => {
+    it('order paga vira APROVADO, com o valor pago e a referência do orçamento', async () => {
       fetchMock.mockResolvedValue(
         resposta(200, {
-          id: 1234567890,
-          status,
+          id: ORDER_ID,
+          status: 'processed',
           status_detail: 'accredited',
-          external_reference: 'orc-1',
-          transaction_amount: 150.2,
-          date_approved: '2026-10-20T14:30:00.000-03:00',
+          external_reference: ORCAMENTO_ID,
+          total_amount: '150.20',
+          total_paid_amount: '150.20',
+          last_updated_date: '2026-10-20T14:31:08.155Z',
         }),
       );
 
-      const pagamento = await gateway.consultarPagamento('1234567890');
+      const pagamento = await gateway.consultarPagamento(ORDER_ID);
 
-      expect(chamada().url).toBe('https://api.mp.test/v1/payments/1234567890');
+      expect(chamada().url).toBe(`https://api.mp.test/v1/orders/${ORDER_ID}`);
+      expect(chamada().init.method).toBe('GET');
       expect(pagamento).toEqual({
-        id: '1234567890',
-        situacao,
-        statusOriginal: status,
+        id: ORDER_ID,
+        situacao: 'APROVADO',
+        statusOriginal: 'processed',
         detalhe: 'accredited',
-        orcamentoId: 'orc-1',
+        orcamentoId: ORCAMENTO_ID,
         valor: 150.2,
-        pagoEm: new Date('2026-10-20T17:30:00.000Z'),
+        pagoEm: new Date('2026-10-20T14:31:08.155Z'),
       });
     });
 
-    it('campos opcionais ausentes viram null', async () => {
-      fetchMock.mockResolvedValue(
-        resposta(200, { id: 1, status: 'rejected', transaction_amount: 10 }),
-      );
+    it.each(['created', 'canceled', 'expired', 'refunded'])(
+      'order %s vira OUTRA, sem data de pagamento',
+      async (status) => {
+        fetchMock.mockResolvedValue(
+          resposta(200, {
+            id: ORDER_ID,
+            status,
+            total_amount: '150.20',
+            last_updated_date: '2026-10-20T14:31:08.155Z',
+          }),
+        );
 
-      expect(await gateway.consultarPagamento('1')).toMatchObject({
-        detalhe: null,
-        orcamentoId: null,
-        pagoEm: null,
-      });
-    });
-
-    it('pagamento que o Mercado Pago não conhece devolve null, sem nova tentativa', async () => {
-      fetchMock.mockResolvedValue(resposta(404, { message: 'not found' }));
-
-      await expect(gateway.consultarPagamento('123456')).resolves.toBeNull();
-      expect(fetchMock).toHaveBeenCalledTimes(1);
-    });
-  });
-
-  it('estornar manda a chave de idempotência fixa do pagamento', async () => {
-    fetchMock.mockResolvedValue(
-      resposta(201, {
-        id: 99,
-        status: 'approved',
-        date_created: '2026-10-20T15:00:00.000-03:00',
-      }),
+        await expect(gateway.consultarPagamento(ORDER_ID)).resolves.toEqual({
+          id: ORDER_ID,
+          situacao: 'OUTRA',
+          statusOriginal: status,
+          detalhe: null,
+          orcamentoId: null,
+          valor: 150.2,
+          pagoEm: null,
+        });
+      },
     );
 
-    const { estornadoEm } = await gateway.estornar('1234567890');
+    it.each([404, 400])(
+      'order desconhecida (HTTP %s) é null — o aviso simulado do painel manda um id inválido',
+      async (status) => {
+        fetchMock.mockResolvedValue(resposta(status));
 
-    const { url, init } = chamada();
-    expect(url).toBe('https://api.mp.test/v1/payments/1234567890/refunds');
-    expect(init.method).toBe('POST');
-    expect(init.headers).toMatchObject({
-      'X-Idempotency-Key': 'estorno-1234567890',
+        await expect(gateway.consultarPagamento('123456')).resolves.toBeNull();
+      },
+    );
+
+    it('credencial inválida é erro', async () => {
+      fetchMock.mockResolvedValue(resposta(401));
+
+      await expect(gateway.consultarPagamento(ORDER_ID)).rejects.toThrow(
+        'Falha no Mercado Pago ao consultar a cobrança: HTTP 401',
+      );
     });
-    expect(estornadoEm).toEqual(new Date('2026-10-20T18:00:00.000Z'));
   });
 
-  it('estorno sem data na resposta usa o momento atual', async () => {
-    fetchMock.mockResolvedValue(resposta(201, { id: 99 }));
+  describe('estornar', () => {
+    it('estorna o total da order, sem corpo e com chave de idempotência', async () => {
+      fetchMock.mockResolvedValue(
+        resposta(201, {
+          id: ORDER_ID,
+          transactions: { refunds: [{ status: 'processing' }] },
+        }),
+      );
 
-    const { estornadoEm } = await gateway.estornar('1');
+      const { estornadoEm } = await gateway.estornar(ORDER_ID);
 
-    expect(estornadoEm).toBeInstanceOf(Date);
+      const { url, init } = chamada();
+      expect(url).toBe(`https://api.mp.test/v1/orders/${ORDER_ID}/refund`);
+      expect(init.method).toBe('POST');
+      expect(init.body).toBeUndefined();
+      expect(init.headers).toMatchObject({
+        'X-Idempotency-Key': `estorno-${ORDER_ID}`,
+      });
+      expect(estornadoEm).toBeInstanceOf(Date);
+    });
+
+    it('estorno repetido depois que a chave expirou: 409 com a order já estornada é sucesso', async () => {
+      fetchMock
+        .mockResolvedValueOnce(
+          resposta(409, { errors: [{ code: 'conflict' }] }),
+        )
+        .mockResolvedValueOnce(
+          resposta(200, {
+            id: ORDER_ID,
+            status: 'refunded',
+            total_amount: '1',
+          }),
+        );
+
+      await expect(gateway.estornar(ORDER_ID)).resolves.toBeDefined();
+      expect(chamada(1).url).toBe(`https://api.mp.test/v1/orders/${ORDER_ID}`);
+    });
+
+    it('409 com a order ainda paga é erro', async () => {
+      fetchMock
+        .mockResolvedValueOnce(
+          resposta(409, { errors: [{ code: 'conflict' }] }),
+        )
+        .mockResolvedValueOnce(
+          resposta(200, {
+            id: ORDER_ID,
+            status: 'processed',
+            total_amount: '1',
+          }),
+        );
+
+      await expect(gateway.estornar(ORDER_ID)).rejects.toThrow(
+        'Falha no Mercado Pago ao estornar o pagamento: HTTP 409 (conflict)',
+      );
+    });
+
+    it('outro 4xx é erro, sem consultar a order', async () => {
+      fetchMock.mockResolvedValue(resposta(400));
+
+      await expect(gateway.estornar(ORDER_ID)).rejects.toThrow('HTTP 400');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('timeout e nova tentativa', () => {
     it('repete depois de erro de rede e devolve a segunda resposta', async () => {
       fetchMock
         .mockRejectedValueOnce(new DOMException('timeout', 'TimeoutError'))
-        .mockResolvedValueOnce(resposta(201, { id: 99 }));
+        .mockResolvedValueOnce(resposta(201, { id: ORDER_ID }));
 
-      await expect(gateway.estornar('1')).resolves.toBeDefined();
+      await expect(gateway.estornar(ORDER_ID)).resolves.toBeDefined();
       expect(fetchMock).toHaveBeenCalledTimes(2);
       expect(chamada().init.signal).toBeInstanceOf(AbortSignal);
     });
@@ -208,7 +291,7 @@ describe('MercadoPagoGateway', () => {
       async (status) => {
         fetchMock.mockImplementation(() => Promise.resolve(resposta(status)));
 
-        await expect(gateway.estornar('1')).rejects.toThrow(
+        await expect(gateway.estornar(ORDER_ID)).rejects.toThrow(
           new GatewayPagamentoError('estornar o pagamento', `HTTP ${status}`),
         );
         expect(fetchMock).toHaveBeenCalledTimes(TENTATIVAS);
@@ -219,7 +302,7 @@ describe('MercadoPagoGateway', () => {
       fetchMock.mockResolvedValue(resposta(401, { message: 'invalid token' }));
 
       await expect(
-        gateway.criarCobranca(orcamentoDeExemplo(), new Date()),
+        gateway.criarCobranca(orcamentoDeExemplo(), 72, new Date()),
       ).rejects.toBeInstanceOf(GatewayPagamentoError);
       expect(fetchMock).toHaveBeenCalledTimes(1);
     });
@@ -227,8 +310,8 @@ describe('MercadoPagoGateway', () => {
     it('falha de rede em todas as tentativas vira GatewayPagamentoError', async () => {
       fetchMock.mockRejectedValue(new TypeError('fetch failed'));
 
-      await expect(gateway.consultarPagamento('1')).rejects.toThrow(
-        'Falha no Mercado Pago ao consultar o pagamento: TypeError',
+      await expect(gateway.consultarPagamento(ORDER_ID)).rejects.toThrow(
+        'Falha no Mercado Pago ao consultar a cobrança: TypeError',
       );
     });
 
@@ -236,7 +319,7 @@ describe('MercadoPagoGateway', () => {
       // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
       fetchMock.mockImplementation(() => Promise.reject('desconectado'));
 
-      await expect(gateway.estornar('1')).rejects.toThrow('desconectado');
+      await expect(gateway.estornar(ORDER_ID)).rejects.toThrow('desconectado');
     });
   });
 });

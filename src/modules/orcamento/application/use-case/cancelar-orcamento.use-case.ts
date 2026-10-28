@@ -21,20 +21,22 @@ import { lerMotivo } from '../shared/ler-motivo';
 /**
  * Consome `CancelarOrcamento`, a compensação enviada pelo orquestrador quando o
  * funcionário cancela uma OS que espera o cliente (aprovação ou pagamento): o
- * cliente desistiu, o link expirou ou os pagamentos foram recusados e ele não
- * tentou de novo. O que fazer depende de onde o orçamento parou:
+ * cliente desistiu, o QR Code expirou ou os pagamentos foram recusados e ele
+ * não tentou de novo. O que fazer depende de onde o orçamento parou:
  *
  * | Status do orçamento      | O que acontece                                      |
  * |--------------------------|-----------------------------------------------------|
  * | `AGUARDANDO_APROVACAO`   | cancela                                             |
- * | `APROVADO` (tem link)    | expira o link no Mercado Pago e cancela             |
+ * | `APROVADO` (tem QR Code) | cancela a cobrança no Mercado Pago e o orçamento    |
  * | `PAGO`                   | estorna, cancela e responde `PagamentoEstornado`    |
  * | `RECUSADO` / `CANCELADO` | nada: já está encerrado (comando repetido)          |
  *
- * O link é expirado porque, no Checkout Pro, ele continua aceitando pagamento
- * (inclusive depois de uma recusa). Se o Mercado Pago falhar, a mensagem volta para a fila
- * e o cancelamento é repetido; depois de 5 tentativas vai para a DLQ, então a
- * compensação nunca se perde.
+ * A cobrança é cancelada porque o QR Code aceita pagamento até expirar,
+ * inclusive depois de uma recusa. Se o cliente pagou no meio do cancelamento, o
+ * Mercado Pago não cancela a cobrança paga: o orçamento é cancelado mesmo assim
+ * e o aviso do pagamento cai no estorno automático. Se o Mercado Pago falhar, a
+ * mensagem volta para a fila e o cancelamento é repetido; depois de 5
+ * tentativas vai para a DLQ, então a compensação nunca se perde.
  */
 @Injectable()
 export class CancelarOrcamentoUseCase {
@@ -75,10 +77,7 @@ export class CancelarOrcamentoUseCase {
 
       case 'APROVADO':
         if (orcamento.cobranca) {
-          await this.gateway.expirarCobranca(
-            orcamento.cobranca.preferenciaId,
-            agora,
-          );
+          await this.gateway.cancelarCobranca(orcamento.cobranca.id);
         }
         return this.cancelar(orcamento, motivo, agora);
 
