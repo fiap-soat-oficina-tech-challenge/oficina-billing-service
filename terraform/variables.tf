@@ -30,7 +30,7 @@ variable "db_username" {
 }
 
 variable "db_engine_version" {
-  description = "Só a major: o RDS escolhe a minor suportada na criação (mesma regra de tc3-infra-db)."
+  description = "Só a major: o RDS escolhe a minor suportada na criação (mesma regra do banco do OS)."
   type        = string
   default     = "17"
 }
