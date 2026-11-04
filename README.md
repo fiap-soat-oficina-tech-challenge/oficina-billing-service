@@ -2,11 +2,11 @@
 
 Orçamentos, aprovação e pagamentos com o Mercado Pago.
 
-Microsserviço do Tech Challenge da Fase 4 (FIAP SOAT). A oficina mecânica foi dividida em três serviços: OS Service, Billing Service e Execution Service. A Saga é orquestrada pelo OS Service. Os contratos de mensagens e rotas entre os serviços estão em [docs/contratos.md](https://github.com/LucasValada/tech-challenge-fiap/blob/develop/docs/contratos.md), e este serviço segue esse documento à risca.
+Microsserviço do Tech Challenge da Fase 4 (FIAP SOAT). A oficina mecânica foi dividida em três serviços: OS Service, Billing Service e Execution Service. A Saga é orquestrada pelo OS Service. Os contratos de mensagens e rotas entre os serviços estão em [docs/contratos.md](https://github.com/fiap-soat-oficina-tech-challenge/tech-challenge-fiap/blob/develop/docs/contratos.md), e este serviço segue esse documento à risca.
 
 | Serviço | Repositório | Banco |
 |---|---|---|
-| OS Service (orquestrador da Saga) | [LucasValada/tech-challenge-fiap](https://github.com/LucasValada/tech-challenge-fiap) | PostgreSQL |
+| OS Service (orquestrador da Saga) | [fiap-soat-oficina-tech-challenge/tech-challenge-fiap](https://github.com/fiap-soat-oficina-tech-challenge/tech-challenge-fiap) | PostgreSQL |
 | Billing Service | [oficina-billing-service](https://github.com/fiap-soat-oficina-tech-challenge/oficina-billing-service) | PostgreSQL |
 | Execution Service | [oficina-execution-service](https://github.com/fiap-soat-oficina-tech-challenge/oficina-execution-service) | DynamoDB |
 
