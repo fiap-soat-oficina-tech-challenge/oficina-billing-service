@@ -1,5 +1,5 @@
 # Banco próprio do Billing (PostgreSQL, SQL): orçamentos, pagamentos e estornos.
-# Mesmo desenho do banco do OS em tc3-infra-db: subnet privada, storage
+# Mesmo desenho do banco do OS (terraform/ do OS Service): subnet privada, storage
 # criptografado e acesso só a partir dos nós do EKS.
 
 resource "aws_db_subnet_group" "billing" {

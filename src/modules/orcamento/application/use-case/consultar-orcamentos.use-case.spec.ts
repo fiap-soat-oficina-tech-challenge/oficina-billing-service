@@ -23,7 +23,7 @@ describe('ConsultarOrcamentosUseCase', () => {
       'p1',
       pagamentoDeExemplo({
         id: 'p1',
-        status: 'RECUSADO',
+        status: 'ESTORNADO',
         registradoEm: new Date('2026-10-20T13:00:00.000Z'),
       }),
     );

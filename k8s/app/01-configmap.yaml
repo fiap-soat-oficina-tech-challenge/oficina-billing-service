@@ -18,14 +18,17 @@ data:
   BILLING_COMMANDS_QUEUE_URL: "https://sqs.us-east-1.amazonaws.com/008363475762/oficina-billing-commands"
   SAGA_REPLIES_QUEUE_URL: "https://sqs.us-east-1.amazonaws.com/008363475762/oficina-os-saga-replies"
 
-  # Mercado Pago (Checkout Pro) com credenciais de teste: o link devolvido ao
-  # cliente é o do sandbox. O aviso de pagamento chega pelo API Gateway da
-  # plataforma (tc3-auth-lambda), que encaminha /billing ao ALB, e o e-mail sai
-  # pela Lambda /mail do mesmo API Gateway. O endereço muda quando a plataforma
-  # é recriada, então o CD troca API_GATEWAY_URL_PLACEHOLDER pelo valor do
-  # parâmetro API_GATEWAY_URL do SSM, publicado por aquela stack.
-  MERCADO_PAGO_SANDBOX: "true"
-  MERCADO_PAGO_NOTIFICATION_URL: "API_GATEWAY_URL_PLACEHOLDER/billing/webhooks/mercado-pago"
+  # Mercado Pago (QR Code dinâmico) com credenciais de teste: as cobranças
+  # ficam ligadas a este caixa, criado uma vez na conta do vendedor de teste
+  # (README, "Mercado Pago"). O aviso de pagamento não é configurado aqui: é o
+  # webhook da aplicação no painel do Mercado Pago, apontado para
+  # <API_GATEWAY_URL>/billing/webhooks/mercado-pago.
+  MERCADO_PAGO_CAIXA_ID: "OFICINA01CAIXA01"
+
+  # O e-mail sai pela Lambda /mail do API Gateway da plataforma
+  # (tc3-auth-lambda). O endereço muda quando a plataforma é recriada, então o
+  # CD troca API_GATEWAY_URL_PLACEHOLDER pelo valor do parâmetro API_GATEWAY_URL
+  # do SSM, publicado por aquela stack.
   MAIL_LAMBDA_URL: "API_GATEWAY_URL_PLACEHOLDER/mail"
 
   # Observabilidade — mesmos valores do OS Service, mudando só o nome do app.

@@ -4,17 +4,17 @@ import {
   GatewayPagamentoError,
   type GatewayPagamento,
   type PagamentoNoGateway,
-  type SituacaoPagamento,
 } from '../../application/ports/gateway-pagamento';
 
 export interface ConfiguracaoMercadoPago {
   /** https://api.mercadopago.com, ou o simulador nos testes locais e no BDD. */
   apiUrl: string;
   accessToken: string;
-  /** URL pública do webhook (API Gateway). Sem ela, o Mercado Pago não avisa. */
-  notificationUrl?: string;
-  /** Com credenciais de teste, o link a usar é o `sandbox_init_point`. */
-  usarSandbox: boolean;
+  /**
+   * `external_id` do caixa (POS) a que as orders ficam ligadas. O caixa e a
+   * loja são criados uma vez na conta do vendedor (README, "Mercado Pago").
+   */
+  caixaId: string;
 }
 
 /** Timeout de cada chamada (docs/contratos.md): abaixo do visibility timeout da fila. */
@@ -25,42 +25,53 @@ export const TIMEOUT_MS = 10_000;
  */
 export const TENTATIVAS = 2;
 
-interface PreferenciaMP {
+interface OrderMP {
   id: string;
-  init_point: string;
-  sandbox_init_point: string;
-}
-
-interface PagamentoMP {
-  id: number | string;
   status: string;
   status_detail?: string | null;
   external_reference?: string | null;
-  transaction_amount: number;
-  date_approved?: string | null;
+  total_amount: string;
+  total_paid_amount?: string | null;
+  last_updated_date?: string | null;
+  type_response?: { qr_data?: string | null } | null;
 }
 
-interface EstornoMP {
-  date_created?: string | null;
-}
-
-/** 404 do Mercado Pago: só a consulta de pagamento trata como "não existe". */
+/** 404 do Mercado Pago. */
 class RespostaNaoEncontrada extends GatewayPagamentoError {
   constructor(operacao: string) {
     super(operacao, 'HTTP 404');
   }
 }
 
+/** 4xx que não se resolve repetindo; guarda os códigos de erro do corpo. */
+class RespostaRecusada extends GatewayPagamentoError {
+  constructor(
+    operacao: string,
+    readonly status: number,
+    readonly codigos: string[],
+  ) {
+    super(
+      operacao,
+      `HTTP ${status}${codigos.length ? ` (${codigos.join(', ')})` : ''}`,
+    );
+  }
+}
+
 /**
- * Adaptador do Mercado Pago (Checkout Pro), pela API REST.
+ * Adaptador do Mercado Pago (QR Code dinâmico), pela Orders API.
  *
- * - Cobrança: `POST /checkout/preferences`, com `external_reference` = id do
- *   orçamento e prazo de expiração; o cliente paga pelo link devolvido.
- * - Expiração: `PUT /checkout/preferences/{id}` com o prazo no passado.
- * - Consulta: `GET /v1/payments/{id}` — é daqui, e não do aviso do webhook,
- *   que vêm a situação e o valor do pagamento.
- * - Estorno: `POST /v1/payments/{id}/refunds`, com `X-Idempotency-Key` fixa por
- *   pagamento, para uma nova tentativa nunca estornar duas vezes.
+ * - Cobrança: `POST /v1/orders` com `type: qr` e `config.qr.mode: dynamic`, no
+ *   caixa configurado; `external_reference` = id do orçamento. O QR Code vem em
+ *   `type_response.qr_data`.
+ * - Cancelamento: `POST /v1/orders/{id}/cancel`, que só vale para order ainda
+ *   não paga.
+ * - Consulta: `GET /v1/orders/{id}` — é daqui, e não do aviso do webhook, que
+ *   vêm a situação e o valor.
+ * - Estorno: `POST /v1/orders/{id}/refund`, sem corpo (estorno total).
+ *
+ * Toda escrita leva `X-Idempotency-Key` fixa por orçamento ou por order: uma
+ * nova tentativa (aqui, ou a de uma mensagem que voltou para a fila) nunca cria
+ * duas cobranças nem estorna duas vezes.
  *
  * Timeout e nova tentativa em falhas transitórias (rede, 429 e 5xx). Um 4xx não
  * é repetido: é pedido errado ou credencial inválida, e repetir não resolve.
@@ -71,90 +82,132 @@ export class MercadoPagoGateway implements GatewayPagamento {
     private readonly esperaEntreTentativasMs = 500,
   ) {}
 
-  async criarCobranca(orcamento: Orcamento, expiraEm: Date): Promise<Cobranca> {
-    const preferencia = await this.chamar<PreferenciaMP>(
-      'criar o link de pagamento',
+  async criarCobranca(
+    orcamento: Orcamento,
+    prazoEmHoras: number,
+    agora: Date,
+  ): Promise<Cobranca> {
+    const valor = orcamento.valorTotal.toFixed(2);
+    const order = await this.chamar<OrderMP>(
+      'criar a cobrança',
       'POST',
-      '/checkout/preferences',
+      '/v1/orders',
       {
-        items: [
-          {
-            id: orcamento.id,
-            title: `Orçamento da OS ${orcamento.codigoOS} - Oficina SOAT`,
-            quantity: 1,
-            unit_price: orcamento.valorTotal,
-            currency_id: 'BRL',
-          },
-        ],
+        type: 'qr',
+        total_amount: valor,
+        description: `Orçamento da OS ${orcamento.codigoOS} - Oficina SOAT`,
         external_reference: orcamento.id,
-        notification_url: this.config.notificationUrl,
-        expires: true,
-        expiration_date_to: dataMercadoPago(expiraEm),
+        expiration_time: `PT${prazoEmHoras}H`,
+        config: {
+          qr: { external_pos_id: this.config.caixaId, mode: 'dynamic' },
+        },
+        transactions: { payments: [{ amount: valor }] },
       },
+      { 'X-Idempotency-Key': `cobranca-${orcamento.id}` },
     );
 
-    return {
-      preferenciaId: preferencia.id,
-      linkPagamento: this.config.usarSandbox
-        ? preferencia.sandbox_init_point
-        : preferencia.init_point,
-      expiraEm,
-    };
-  }
-
-  async expirarCobranca(preferenciaId: string, agora: Date): Promise<void> {
-    // Um minuto no passado: o relógio do Mercado Pago pode estar um pouco atrás
-    // do nosso, e o link precisa parar de aceitar pagamento já.
-    const passado = new Date(agora.getTime() - 60_000);
-    await this.chamar(
-      'expirar o link de pagamento',
-      'PUT',
-      `/checkout/preferences/${encodeURIComponent(preferenciaId)}`,
-      { expires: true, expiration_date_to: dataMercadoPago(passado) },
-    );
-  }
-
-  async consultarPagamento(
-    pagamentoId: string,
-  ): Promise<PagamentoNoGateway | null> {
-    let pagamento: PagamentoMP;
-    try {
-      pagamento = await this.chamar<PagamentoMP>(
-        'consultar o pagamento',
-        'GET',
-        `/v1/payments/${encodeURIComponent(pagamentoId)}`,
+    const qrCode = order.type_response?.qr_data;
+    if (!qrCode) {
+      throw new GatewayPagamentoError(
+        'criar a cobrança',
+        'resposta sem type_response.qr_data',
       );
-    } catch (erro) {
-      if (erro instanceof RespostaNaoEncontrada) return null;
-      throw erro;
     }
 
     return {
-      id: String(pagamento.id),
-      situacao: traduzirStatus(pagamento.status),
-      statusOriginal: pagamento.status,
-      detalhe: pagamento.status_detail ?? null,
-      orcamentoId: pagamento.external_reference ?? null,
-      valor: pagamento.transaction_amount,
-      pagoEm: pagamento.date_approved
-        ? new Date(pagamento.date_approved)
-        : null,
+      id: order.id,
+      qrCode,
+      expiraEm: new Date(agora.getTime() + prazoEmHoras * 60 * 60 * 1000),
     };
   }
 
-  async estornar(pagamentoId: string): Promise<{ estornadoEm: Date }> {
-    const estorno = await this.chamar<EstornoMP>(
-      'estornar o pagamento',
-      'POST',
-      `/v1/payments/${encodeURIComponent(pagamentoId)}/refunds`,
-      {},
-      { 'X-Idempotency-Key': `estorno-${pagamentoId}` },
-    );
+  async cancelarCobranca(cobrancaId: string): Promise<void> {
+    try {
+      await this.chamar(
+        'cancelar a cobrança',
+        'POST',
+        `/v1/orders/${encodeURIComponent(cobrancaId)}/cancel`,
+        undefined,
+        { 'X-Idempotency-Key': `cancelamento-${cobrancaId}` },
+      );
+    } catch (erro) {
+      // Paga, expirada ou já cancelada: a order já não aceita pagamento. Outro
+      // 409 (como `instore_order_locked_error`, com um pagamento em andamento)
+      // é repetido mais tarde, com a mensagem voltando para a fila.
+      if (
+        erro instanceof RespostaRecusada &&
+        erro.codigos.includes('cannot_cancel_order')
+      ) {
+        registrarEvento('mercado_pago.cobranca_ja_encerrada', {
+          cobranca_id: cobrancaId,
+        });
+        return;
+      }
+      throw erro;
+    }
+  }
+
+  async consultarPagamento(
+    cobrancaId: string,
+  ): Promise<PagamentoNoGateway | null> {
+    let order: OrderMP;
+    try {
+      order = await this.buscarOrder(cobrancaId);
+    } catch (erro) {
+      // 404, ou 400 para um id fora do formato (o aviso simulado do painel
+      // manda `123456`): a order não existe.
+      if (
+        erro instanceof RespostaNaoEncontrada ||
+        (erro instanceof RespostaRecusada && erro.status === 400)
+      ) {
+        return null;
+      }
+      throw erro;
+    }
+
+    const paga = order.status === 'processed';
     return {
-      estornadoEm: estorno.date_created
-        ? new Date(estorno.date_created)
-        : new Date(),
+      id: order.id,
+      situacao: paga ? 'APROVADO' : 'OUTRA',
+      statusOriginal: order.status,
+      detalhe: order.status_detail ?? null,
+      orcamentoId: order.external_reference ?? null,
+      valor: Number(order.total_paid_amount ?? order.total_amount),
+      pagoEm:
+        paga && order.last_updated_date
+          ? new Date(order.last_updated_date)
+          : null,
     };
+  }
+
+  async estornar(cobrancaId: string): Promise<{ estornadoEm: Date }> {
+    try {
+      await this.chamar(
+        'estornar o pagamento',
+        'POST',
+        `/v1/orders/${encodeURIComponent(cobrancaId)}/refund`,
+        undefined,
+        { 'X-Idempotency-Key': `estorno-${cobrancaId}` },
+      );
+    } catch (erro) {
+      // Passadas 24 h, a chave de idempotência expira e um estorno repetido
+      // volta 409. Se a order já está estornada, o estorno foi feito.
+      if (!(erro instanceof RespostaRecusada && erro.status === 409)) {
+        throw erro;
+      }
+      const order = await this.buscarOrder(cobrancaId);
+      if (order.status !== 'refunded') throw erro;
+    }
+    // A resposta do estorno não traz data; o estorno total é imediato.
+    return { estornadoEm: new Date() };
+  }
+
+  private buscarOrder(cobrancaId: string): Promise<OrderMP> {
+    return this.chamar<OrderMP>(
+      'consultar a cobrança',
+      'GET',
+      `/v1/orders/${encodeURIComponent(cobrancaId)}`,
+    );
   }
 
   /**
@@ -163,7 +216,7 @@ export class MercadoPagoGateway implements GatewayPagamento {
    */
   private async chamar<T>(
     operacao: string,
-    metodo: 'GET' | 'POST' | 'PUT',
+    metodo: 'GET' | 'POST',
     caminho: string,
     corpo?: unknown,
     cabecalhos: Record<string, string> = {},
@@ -196,7 +249,13 @@ export class MercadoPagoGateway implements GatewayPagamento {
 
       falha = `HTTP ${resposta.status}`;
       this.registrarTentativa(operacao, tentativa, falha);
-      if (!transitorio(resposta.status)) break;
+      if (!transitorio(resposta.status)) {
+        throw new RespostaRecusada(
+          operacao,
+          resposta.status,
+          await codigosDeErro(resposta),
+        );
+      }
     }
 
     throw new GatewayPagamentoError(operacao, falha);
@@ -219,15 +278,18 @@ function transitorio(status: number): boolean {
   return status === 429 || status >= 500;
 }
 
-function traduzirStatus(status: string): SituacaoPagamento {
-  if (status === 'approved') return 'APROVADO';
-  if (status === 'rejected') return 'RECUSADO';
-  return 'OUTRA';
-}
-
-/** Data no formato que o Mercado Pago documenta: `2026-10-20T14:03:00.000+00:00`. */
-function dataMercadoPago(data: Date): string {
-  return data.toISOString().replace('Z', '+00:00');
+/** Os `errors[].code` do corpo de erro da Orders API, se houver. */
+async function codigosDeErro(resposta: Response): Promise<string[]> {
+  try {
+    const corpo = (await resposta.json()) as {
+      errors?: { code?: unknown }[];
+    };
+    return (corpo.errors ?? [])
+      .map((erro) => erro.code)
+      .filter((codigo): codigo is string => typeof codigo === 'string');
+  } catch {
+    return [];
+  }
 }
 
 function esperar(ms: number): Promise<void> {

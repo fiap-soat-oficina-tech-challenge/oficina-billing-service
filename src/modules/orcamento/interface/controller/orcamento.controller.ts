@@ -60,14 +60,14 @@ export class OrcamentoController {
     @Req() req: RequisicaoAutenticada,
   ): Promise<OrcamentoResponseDto[]> {
     const orcamentos = await this.consultar.listarDaOs(filtro.osId, req.user);
-    return orcamentos.map(apresentarOrcamento);
+    return Promise.all(orcamentos.map(apresentarOrcamento));
   }
 
   @Get(':id')
   @Roles('admin', 'cliente')
   @ApiOperation({
     summary: 'Consultar um orçamento',
-    description: 'Depois da aprovação, inclui o link de pagamento.',
+    description: 'Depois da aprovação, inclui o QR Code de pagamento.',
   })
   @ApiOkResponse({ type: OrcamentoResponseDto })
   @ApiResponse({ status: 404, description: 'Orçamento não encontrado' })
@@ -84,7 +84,7 @@ export class OrcamentoController {
   @ApiOperation({
     summary: 'Aprovar o orçamento (cliente)',
     description:
-      'Cria o link de pagamento no Mercado Pago, devolve-o na resposta (linkPagamento) e o envia por e-mail. ' +
+      'Cria a cobrança no Mercado Pago, devolve o QR Code na resposta (qrCode) e o envia por e-mail. ' +
       'Avisa o orquestrador (OrcamentoAprovado) e a OS passa para AGUARDANDO_PAGAMENTO.',
   })
   @ApiOkResponse({ type: OrcamentoResponseDto })

@@ -19,13 +19,13 @@ O CD monta o Secret `billing-secret` do Kubernetes a partir destes parâmetros (
 | `JWT_SECRET` | o mesmo do OS Service e da Lambda de autenticação (Fase 3) |
 | `MAIL_API_TOKEN` | o mesmo do OS Service, gerado pela stack `tc3-auth-lambda` |
 | `NEW_RELIC_LICENSE_KEY` | publicado por `tc3-infra-k8s` |
-| `billing/MERCADO_PAGO_ACCESS_TOKEN` | **criado à mão**, com o Access Token de teste da aplicação do Checkout Pro (como os parâmetros `MAIL_*` da Fase 3: é credencial de conta externa e não sai do Terraform) |
+| `billing/MERCADO_PAGO_ACCESS_TOKEN` | **criado à mão**, com o Access Token de teste da aplicação de QR Code (como os parâmetros `MAIL_*` da Fase 3: é credencial de conta externa e não sai do Terraform) |
 
 O ConfigMap também depende de um parâmetro que não é segredo: `API_GATEWAY_URL`, o endereço do API Gateway publicado pela stack `tc3-auth-lambda`. O CD o usa para montar a URL do aviso do Mercado Pago e a da Lambda de e-mail, que mudam quando a plataforma é recriada.
 
 ## Dependências e ordem
 
-A VPC e o cluster vêm de [`tc3-infra-k8s`](https://github.com/tiagostorch/tc3-infra-k8s), lidos pelo state remoto. Por isso:
+A VPC e o cluster vêm de [`tc3-infra-k8s`](https://github.com/fiap-soat-oficina-tech-challenge/tc3-infra-k8s), lidos pelo state remoto. Por isso:
 
 - **apply:** depois de `tc3-infra-k8s`;
 - **destroy:** antes de `tc3-infra-k8s`, porque a AWS não apaga a role dos nós com esta política ainda anexada.

@@ -53,9 +53,9 @@ function orcamentoGravado(sobrescrever: Record<string, unknown> = {}) {
     origemDecisao: 'CLIENTE',
     motivoRecusa: null,
     motivoCancelamento: null,
-    preferenciaId: COBRANCA.preferenciaId,
-    linkPagamento: COBRANCA.linkPagamento,
-    linkExpiraEm: COBRANCA.expiraEm,
+    cobrancaId: COBRANCA.id,
+    qrCode: COBRANCA.qrCode,
+    cobrancaExpiraEm: COBRANCA.expiraEm,
     criadoEm: AGORA,
     atualizadoEm: AGORA,
     decididoEm: AGORA,
@@ -160,12 +160,12 @@ describe('PrismaOrcamentoRepository', () => {
     });
   });
 
-  it('sem preferência gravada, a cobrança é null', async () => {
+  it('sem cobrança gravada, a cobrança é null', async () => {
     db.orcamento.findUnique.mockResolvedValue(
       orcamentoGravado({
-        preferenciaId: null,
-        linkPagamento: null,
-        linkExpiraEm: null,
+        cobrancaId: null,
+        qrCode: null,
+        cobrancaExpiraEm: null,
       }),
     );
 
@@ -199,9 +199,9 @@ describe('PrismaOrcamentoRepository', () => {
       data: {
         status: 'APROVADO',
         atualizadoEm: AGORA,
-        preferenciaId: COBRANCA.preferenciaId,
-        linkPagamento: COBRANCA.linkPagamento,
-        linkExpiraEm: COBRANCA.expiraEm,
+        cobrancaId: COBRANCA.id,
+        qrCode: COBRANCA.qrCode,
+        cobrancaExpiraEm: COBRANCA.expiraEm,
       },
     });
   });
@@ -241,7 +241,7 @@ describe('PrismaPagamentoRepository', () => {
   it('busca por id convertendo o valor', async () => {
     db.pagamento.findUnique.mockResolvedValue(gravado);
 
-    expect(await repositorio.buscarPorId('1234567890')).toEqual(
+    expect(await repositorio.buscarPorId(COBRANCA.id)).toEqual(
       pagamentoDeExemplo(),
     );
   });
@@ -267,9 +267,7 @@ describe('PrismaPagamentoRepository', () => {
       .mockResolvedValueOnce(gravado)
       .mockResolvedValueOnce(null);
 
-    expect((await repositorio.buscarAprovadoDaOs(OS_ID))?.id).toBe(
-      '1234567890',
-    );
+    expect((await repositorio.buscarAprovadoDaOs(OS_ID))?.id).toBe(COBRANCA.id);
     expect(await repositorio.buscarAprovadoDaOs(OS_ID)).toBeNull();
     expect(db.pagamento.findFirst).toHaveBeenCalledWith({
       where: { osId: OS_ID, status: 'APROVADO' },
@@ -281,14 +279,14 @@ describe('PrismaPagamentoRepository', () => {
       .mockResolvedValueOnce({ count: 1 })
       .mockResolvedValueOnce({ count: 0 });
 
-    expect(await repositorio.marcarEstornado('1234567890', AGORA, 'm')).toBe(
+    expect(await repositorio.marcarEstornado(COBRANCA.id, AGORA, 'm')).toBe(
       true,
     );
-    expect(await repositorio.marcarEstornado('1234567890', AGORA, 'm')).toBe(
+    expect(await repositorio.marcarEstornado(COBRANCA.id, AGORA, 'm')).toBe(
       false,
     );
     expect(db.pagamento.updateMany).toHaveBeenCalledWith({
-      where: { id: '1234567890', status: 'APROVADO' },
+      where: { id: COBRANCA.id, status: 'APROVADO' },
       data: { status: 'ESTORNADO', estornadoEm: AGORA, motivoEstorno: 'm' },
     });
   });

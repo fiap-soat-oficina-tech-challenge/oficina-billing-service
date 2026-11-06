@@ -97,6 +97,24 @@ class LinhaItemResponseDto {
   @ApiProperty({ example: 30 }) subtotal!: number;
 }
 
+export class QrCodeResponseDto {
+  @ApiProperty({
+    description:
+      'Conteúdo do QR Code (padrão EMVCo), como o Mercado Pago o devolve',
+  })
+  conteudo!: string;
+  @ApiProperty({
+    description: 'Imagem PNG do QR Code em data URL, pronta para um <img>',
+    example: 'data:image/png;base64,iVBORw0KGgo...',
+  })
+  imagem!: string;
+  @ApiProperty({
+    format: 'date-time',
+    description: 'Depois disso o QR Code não aceita pagamento',
+  })
+  expiraEm!: Date;
+}
+
 export class OrcamentoResponseDto {
   @ApiProperty({ format: 'uuid' }) id!: string;
   @ApiProperty() osId!: string;
@@ -117,13 +135,11 @@ export class OrcamentoResponseDto {
   motivoCancelamento!: string | null;
   @ApiProperty({
     nullable: true,
-    type: String,
+    type: QrCodeResponseDto,
     description:
-      'Link de pagamento do Mercado Pago; existe depois da aprovação',
+      'QR Code de pagamento do Mercado Pago, pago pelo app; existe depois da aprovação',
   })
-  linkPagamento!: string | null;
-  @ApiProperty({ nullable: true, type: String, format: 'date-time' })
-  linkExpiraEm!: Date | null;
+  qrCode!: QrCodeResponseDto | null;
   @ApiProperty({ description: 'Fluxo da OS (correlationId)' })
   correlationId!: string;
   @ApiProperty({ format: 'date-time' }) criadoEm!: Date;
@@ -137,7 +153,8 @@ export class OrcamentoResponseDto {
 }
 
 export class PagamentoResponseDto {
-  @ApiProperty({ description: 'Id do pagamento no Mercado Pago' }) id!: string;
+  @ApiProperty({ description: 'Id da order paga no Mercado Pago (ORD...)' })
+  id!: string;
   @ApiProperty({ format: 'uuid' }) orcamentoId!: string;
   @ApiProperty() osId!: string;
   @ApiProperty({ enum: STATUS_PAGAMENTO }) status!: StatusPagamento;
@@ -145,7 +162,7 @@ export class PagamentoResponseDto {
   @ApiProperty({
     nullable: true,
     type: String,
-    description: 'status_detail do Mercado Pago',
+    description: 'status_detail da order no Mercado Pago',
     example: 'accredited',
   })
   detalhe!: string | null;
@@ -162,7 +179,6 @@ export class NotificacaoMercadoPagoResponseDto {
     description: 'O que foi feito com o aviso',
     enum: [
       'PAGAMENTO_CONFIRMADO',
-      'PAGAMENTO_RECUSADO',
       'PAGAMENTO_ESTORNADO',
       'JA_PROCESSADO',
       'IGNORADO',

@@ -26,8 +26,8 @@ import {
  *    pagamento já feito;
  * 2. `CancelarOrcamento` com o orçamento já pago — o cliente pagou enquanto a
  *    OS era cancelada;
- * 3. um pagamento aprovado que chega depois do cancelamento (ou um segundo
- *    pagamento do mesmo orçamento).
+ * 3. um pagamento aprovado que chega depois do cancelamento (o cliente pagou o
+ *    QR Code enquanto a OS era cancelada).
  *
  * Em todas, nenhuma OS cancelada fica com dinheiro retido, e o orquestrador
  * recebe `PagamentoEstornado`.
@@ -35,7 +35,7 @@ import {
  * O estorno no Mercado Pago vem primeiro e só depois a gravação com a
  * publicação, na mesma transação. Se a gravação falhar, a mensagem (ou o aviso
  * do Mercado Pago) é processada de novo e o estorno é repetido — o gateway não
- * estorna duas vezes o mesmo pagamento.
+ * estorna duas vezes a mesma cobrança.
  */
 @Injectable()
 export class EstornoDePagamento {

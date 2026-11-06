@@ -167,16 +167,20 @@ export class GatewayFalso implements GatewayPagamento {
   pagamentos = new Map<string, PagamentoNoGateway>();
   falha?: Error;
 
-  criarCobranca(orcamento: Orcamento, expiraEm: Date): Promise<Cobranca> {
-    return this.registrar(`criarCobranca:${orcamento.id}`, {
-      preferenciaId: `pref-${orcamento.id}`,
-      linkPagamento: `https://sandbox.mercadopago.com.br/checkout/${orcamento.id}`,
-      expiraEm,
+  criarCobranca(
+    orcamento: Orcamento,
+    prazoEmHoras: number,
+    agora: Date,
+  ): Promise<Cobranca> {
+    return this.registrar(`criarCobranca:${orcamento.id}:${prazoEmHoras}h`, {
+      id: `ORD-${orcamento.id}`,
+      qrCode: `00020101021243650016COM.MERCADOLIBRE-${orcamento.id}`,
+      expiraEm: new Date(agora.getTime() + prazoEmHoras * 60 * 60 * 1000),
     });
   }
 
-  expirarCobranca(preferenciaId: string): Promise<void> {
-    return this.registrar(`expirarCobranca:${preferenciaId}`, undefined);
+  cancelarCobranca(cobrancaId: string): Promise<void> {
+    return this.registrar(`cancelarCobranca:${cobrancaId}`, undefined);
   }
 
   consultarPagamento(pagamentoId: string): Promise<PagamentoNoGateway | null> {
@@ -206,8 +210,8 @@ export class NotificadorEmMemoria implements Notificador {
     return Promise.resolve();
   }
 
-  enviarLinkPagamento(orcamento: Orcamento): Promise<void> {
-    this.enviados.push(`link:${orcamento.id}`);
+  enviarCobranca(orcamento: Orcamento): Promise<void> {
+    this.enviados.push(`cobranca:${orcamento.id}`);
     return Promise.resolve();
   }
 }
@@ -304,8 +308,9 @@ export function orcamentoDeExemplo(
 }
 
 export const COBRANCA: Cobranca = {
-  preferenciaId: 'pref-1',
-  linkPagamento: 'https://sandbox.mercadopago.com.br/checkout/pref-1',
+  id: 'ORD01JV3AW3NFSTSTB669F41NACDX',
+  qrCode:
+    '00020101021243650016COM.MERCADOLIBRE02013063638f1192a-5fd1-4180-a180-8bcae3556bc35204000053039865802BR5925OFICINA6009SAO PAULO62070503***63041D4F',
   expiraEm: new Date('2026-10-23T14:00:00.000Z'),
 };
 
@@ -313,7 +318,7 @@ export function pagamentoDeExemplo(
   sobrescrever: Partial<Pagamento> = {},
 ): Pagamento {
   return {
-    id: '1234567890',
+    id: COBRANCA.id,
     orcamentoId: ORCAMENTO_ID,
     osId: OS_ID,
     status: 'APROVADO',
@@ -331,9 +336,9 @@ export function pagamentoNoGateway(
   sobrescrever: Partial<PagamentoNoGateway> = {},
 ): PagamentoNoGateway {
   return {
-    id: '1234567890',
+    id: COBRANCA.id,
     situacao: 'APROVADO',
-    statusOriginal: 'approved',
+    statusOriginal: 'processed',
     detalhe: 'accredited',
     orcamentoId: ORCAMENTO_ID,
     valor: 120,

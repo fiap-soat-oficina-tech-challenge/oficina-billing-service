@@ -1,0 +1,12 @@
+{
+  "request": { "method": "POST", "urlPathPattern": "/v1/orders/[^/]+/refund" },
+  "response": {
+    "status": 201,
+    "headers": { "Content-Type": "application/json" },
+    "jsonBody": {
+      "status": "processed",
+      "status_detail": "accredited",
+      "transactions": { "refunds": [{ "status": "processing" }] }
+    }
+  }
+}

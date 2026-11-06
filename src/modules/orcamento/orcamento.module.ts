@@ -64,8 +64,7 @@ import { WebhookController } from './interface/controller/webhook.controller';
           apiUrl:
             process.env.MERCADO_PAGO_API_URL ?? 'https://api.mercadopago.com',
           accessToken: process.env.MERCADO_PAGO_ACCESS_TOKEN ?? '',
-          notificationUrl: process.env.MERCADO_PAGO_NOTIFICATION_URL,
-          usarSandbox: process.env.MERCADO_PAGO_SANDBOX !== 'false',
+          caixaId: process.env.MERCADO_PAGO_CAIXA_ID ?? '',
         }),
     },
     {

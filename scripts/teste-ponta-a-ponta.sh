@@ -119,21 +119,32 @@ payload_orcamento() {
 JSON
 }
 
-# Cadastra no simulador o pagamento que o Mercado Pago devolveria em GET /v1/payments/{id}.
-pagamento_no_mp() {
-  local id="$1" status="$2" detalhe="$3" orcamento="$4"
+# Cadastra no simulador a order do orçamento como o Mercado Pago a devolveria em
+# GET /v1/orders/{id}. O simulador cria a order com o id ORD-<id do orçamento>.
+# `processed` é paga; `created` é aberta, como fica depois de uma recusa.
+order_no_mp() {
+  local orcamento="$1" status="$2" detalhe="$3"
   curl -s -X POST "$MP/__admin/mappings" -d "{
-    \"request\": {\"method\": \"GET\", \"urlPath\": \"/v1/payments/$id\"},
+    \"request\": {\"method\": \"GET\", \"urlPath\": \"/v1/orders/ORD-$orcamento\"},
     \"response\": {\"status\": 200, \"headers\": {\"Content-Type\": \"application/json\"}, \"jsonBody\": {
-      \"id\": $id, \"status\": \"$status\", \"status_detail\": \"$detalhe\",
-      \"external_reference\": \"$orcamento\", \"transaction_amount\": 150.2,
-      \"date_approved\": \"2026-10-20T14:30:00.000-03:00\"}}}" >/dev/null
+      \"id\": \"ORD-$orcamento\", \"type\": \"qr\", \"status\": \"$status\", \"status_detail\": \"$detalhe\",
+      \"external_reference\": \"$orcamento\", \"total_amount\": \"150.20\", \"total_paid_amount\": \"150.20\",
+      \"last_updated_date\": \"2026-10-20T17:30:00.000Z\"}}}" >/dev/null
 }
 
+# Aviso do webhook, como o Mercado Pago manda: tópico order, com o id na query e no corpo.
 aviso_mp() {
-  curl -s -X POST "$API/webhooks/mercado-pago" -H 'Content-Type: application/json' \
-    -d "{\"type\": \"payment\", \"action\": \"payment.updated\", \"data\": {\"id\": \"$1\"}, \"live_mode\": false}" |
+  curl -s -X POST "$API/webhooks/mercado-pago?data.id=$1&type=order" -H 'Content-Type: application/json' \
+    -d "{\"type\": \"order\", \"action\": \"order.processed\", \"data\": {\"id\": \"$1\"}, \"live_mode\": false}" |
     campo resultado
+}
+
+# Chamadas que o Billing fez ao simulador, por método e caminho.
+chamou_mp() {
+  curl -s "$MP/__admin/requests" | python3 -c '
+import json, sys
+print(any(x["request"]["method"] == sys.argv[1] and x["request"]["url"] == sys.argv[2]
+          for x in json.load(sys.stdin)["requests"]))' "$1" "$2"
 }
 
 orcamento_da_os() {
@@ -167,19 +178,24 @@ confere "funcionário não aprova pelo cliente (403)" \
   "$(http_status -X POST "$API/orcamentos/$ORC1/aprovar" -H "Authorization: Bearer $TOKEN_FUNCIONARIO")" 403
 
 APROVACAO=$(curl -s -X POST "$API/orcamentos/$ORC1/aprovar" -H "Authorization: Bearer $TOKEN_CLIENTE")
-confere "aprovação devolve o link do sandbox" "$(echo "$APROVACAO" | campo linkPagamento)" \
-  "http://localhost:8089/sandbox/checkout/pref-$ORC1"
+confere "aprovação devolve o QR Code do Mercado Pago" \
+  "$(echo "$APROVACAO" | campo qrCode conteudo | grep -c "SIMULADOR-$ORC1")" 1
+confere "e a imagem do QR Code em PNG" \
+  "$(echo "$APROVACAO" | campo qrCode imagem | cut -c1-33)" "data:image/png;base64,iVBORw0KGgo"
+confere "a consulta do orçamento também traz o QR Code" \
+  "$(curl -s "$API/orcamentos/$ORC1" -H "Authorization: Bearer $TOKEN_CLIENTE" | campo qrCode conteudo)" \
+  "$(echo "$APROVACAO" | campo qrCode conteudo)"
 R=$(resposta); IFS='|' read -r TIPO _ _ PAYLOAD <<<"$R"
 confere "aprovação → OrcamentoAprovado (origem CLIENTE)" "$TIPO $(echo "$PAYLOAD" | campo origem)" "OrcamentoAprovado CLIENTE"
 confere "aprovar de novo é 409" \
   "$(http_status -X POST "$API/orcamentos/$ORC1/aprovar" -H "Authorization: Bearer $TOKEN_CLIENTE")" 409
 
-pagamento_no_mp 9101 approved accredited "$ORC1"
-confere "aviso do Mercado Pago (aprovado)" "$(aviso_mp 9101)" PAGAMENTO_CONFIRMADO
+order_no_mp "$ORC1" processed accredited
+confere "aviso do Mercado Pago (order paga)" "$(aviso_mp "ORD-$ORC1")" PAGAMENTO_CONFIRMADO
 R=$(resposta); IFS='|' read -r TIPO _ _ PAYLOAD <<<"$R"
-confere "→ PagamentoConfirmado com o id do Mercado Pago" "$TIPO $(echo "$PAYLOAD" | campo pagamentoId)" "PagamentoConfirmado 9101"
+confere "→ PagamentoConfirmado com o id da order" "$TIPO $(echo "$PAYLOAD" | campo pagamentoId)" "PagamentoConfirmado ORD-$ORC1"
 confere "orçamento PAGO" "$(orcamento_da_os "$OS1" status)" PAGO
-confere "aviso repetido não é tratado de novo" "$(aviso_mp 9101)" JA_PROCESSADO
+confere "aviso repetido não é tratado de novo" "$(aviso_mp "ORD-$ORC1")" JA_PROCESSADO
 
 comando EstornarPagamento "$OS1" '{"motivo": "Reparo falhou: peça indisponível"}'
 R=$(resposta); IFS='|' read -r TIPO _ _ _ <<<"$R"
@@ -189,9 +205,9 @@ PAGAMENTOS=$(curl -s "$API/pagamentos?osId=$OS1" -H "Authorization: Bearer $TOKE
 confere "pagamento estornado, com o motivo" \
   "$(echo "$PAGAMENTOS" | campo 0 status) $(echo "$PAGAMENTOS" | campo 0 motivoEstorno)" \
   "ESTORNADO Reparo falhou: peça indisponível"
-confere "estorno chamado no Mercado Pago com a chave de idempotência" \
-  "$(curl -s "$MP/__admin/requests" | python3 -c 'import json,sys;r=[x["request"] for x in json.load(sys.stdin)["requests"] if x["request"]["url"].endswith("/9101/refunds")];print(r[0]["headers"].get("X-Idempotency-Key") if r else "")')" \
-  estorno-9101
+confere "estorno da order no Mercado Pago com a chave de idempotência" \
+  "$(curl -s "$MP/__admin/requests" | python3 -c 'import json,sys;r=[x["request"] for x in json.load(sys.stdin)["requests"] if x["request"]["url"].endswith("/ORD-'"$ORC1"'/refund")];print(r[0]["headers"].get("X-Idempotency-Key") if r else "")')" \
+  "estorno-ORD-$ORC1"
 comando EstornarPagamento "$OS1" '{"motivo": "repetido"}'
 espera_fila_de_comandos_vazia
 sem_resposta "EstornarPagamento repetido não estorna de novo"
@@ -208,7 +224,7 @@ confere "recusa → OrcamentoRecusado com o motivo" "$TIPO $(echo "$PAYLOAD" | c
   "OrcamentoRecusado Valor acima do esperado"
 confere "orçamento recusado" "$(orcamento_da_os "$OS2" status)" RECUSADO
 
-echo "== 3. Sistema externo aprova, o pagamento é recusado e o cliente paga na segunda tentativa"
+echo "== 3. Sistema externo aprova, a primeira tentativa é recusada e o cliente paga pelo mesmo QR Code"
 OS3=$(uuid); C3="OS-2026-$(python3 -c 'import random;print(random.randint(100000,999999))')"
 comando GerarOrcamento "$OS3" "$(payload_orcamento "$C3")"
 resposta >/dev/null
@@ -220,21 +236,20 @@ curl -s -X POST "$API/webhooks/orcamento" -H "x-webhook-token: $WEBHOOK_TOKEN" \
 R=$(resposta); IFS='|' read -r TIPO _ _ PAYLOAD <<<"$R"
 confere "→ OrcamentoAprovado (origem SISTEMA_EXTERNO)" "$TIPO $(echo "$PAYLOAD" | campo origem)" \
   "OrcamentoAprovado SISTEMA_EXTERNO"
-pagamento_no_mp 9301 rejected cc_rejected_other_reason "$ORC3"
-confere "aviso do Mercado Pago (recusado)" "$(aviso_mp 9301)" PAGAMENTO_RECUSADO
+# Na recusa, a order continua aberta e o Mercado Pago não avisa; um aviso que
+# chegasse mesmo assim não mudaria nada.
+order_no_mp "$ORC3" created created
+confere "order ainda aberta (recusa) não muda nada" "$(aviso_mp "ORD-$ORC3")" IGNORADO
+sem_resposta "nenhuma resposta para a Saga"
+confere "o orçamento continua aprovado, com o mesmo QR Code" "$(orcamento_da_os "$OS3" status)" APROVADO
+order_no_mp "$ORC3" processed accredited
+confere "pagamento pelo mesmo QR Code" "$(aviso_mp "ORD-$ORC3")" PAGAMENTO_CONFIRMADO
 R=$(resposta); IFS='|' read -r TIPO _ _ PAYLOAD <<<"$R"
-confere "→ PagamentoRecusado com o status_detail (informativo)" "$TIPO $(echo "$PAYLOAD" | campo detalhe)" \
-  "PagamentoRecusado cc_rejected_other_reason"
-confere "o orçamento continua aprovado, com o mesmo link" "$(orcamento_da_os "$OS3" status)" APROVADO
-pagamento_no_mp 9302 approved accredited "$ORC3"
-confere "nova tentativa aprovada" "$(aviso_mp 9302)" PAGAMENTO_CONFIRMADO
-R=$(resposta); IFS='|' read -r TIPO _ _ PAYLOAD <<<"$R"
-confere "→ PagamentoConfirmado com o id da segunda tentativa" "$TIPO $(echo "$PAYLOAD" | campo pagamentoId)" \
-  "PagamentoConfirmado 9302"
+confere "→ PagamentoConfirmado" "$TIPO $(echo "$PAYLOAD" | campo pagamentoId)" "PagamentoConfirmado ORD-$ORC3"
 confere "orçamento PAGO" "$(orcamento_da_os "$OS3" status)" PAGO
-confere "as duas tentativas ficam registradas" \
+confere "um pagamento registrado" \
   "$(curl -s "$API/pagamentos?osId=$OS3" -H "Authorization: Bearer $TOKEN_FUNCIONARIO" | python3 -c 'import json,sys;print(" ".join(p["status"] for p in json.load(sys.stdin)))')" \
-  "RECUSADO APROVADO"
+  APROVADO
 
 echo "== 4. Funcionário cancela a OS esperando pagamento; pagamento atrasado é estornado"
 OS4=$(uuid)
@@ -246,12 +261,10 @@ resposta >/dev/null
 comando CancelarOrcamento "$OS4" '{"motivo": "Cliente desistiu do pagamento"}'
 espera_fila_de_comandos_vazia
 confere "CancelarOrcamento cancela o orçamento" "$(orcamento_da_os "$OS4" status)" CANCELADO
-confere "e expira o link no Mercado Pago" \
-  "$(curl -s "$MP/__admin/requests" | python3 -c "import json,sys;print(any(x['request']['method']=='PUT' and x['request']['url']=='/checkout/preferences/pref-$ORC4' for x in json.load(sys.stdin)['requests']))")" \
-  True
+confere "e cancela a order no Mercado Pago" "$(chamou_mp POST "/v1/orders/ORD-$ORC4/cancel")" True
 sem_resposta "cancelamento sem pagamento não gera resposta"
-pagamento_no_mp 9401 approved accredited "$ORC4"
-confere "aviso de pagamento depois do cancelamento" "$(aviso_mp 9401)" PAGAMENTO_ESTORNADO
+order_no_mp "$ORC4" processed accredited
+confere "aviso de pagamento depois do cancelamento" "$(aviso_mp "ORD-$ORC4")" PAGAMENTO_ESTORNADO
 R=$(resposta); IFS='|' read -r TIPO _ _ _ <<<"$R"
 confere "→ PagamentoEstornado" "$TIPO" PagamentoEstornado
 confere "orçamento continua cancelado" "$(orcamento_da_os "$OS4" status)" CANCELADO
@@ -267,7 +280,7 @@ OS6=$(uuid)
 comando GerarOrcamento "$OS6" "$(payload_orcamento "OS-2026-$(python3 -c 'import random;print(random.randint(100000,999999))')")"
 resposta >/dev/null
 ORC6=$(orcamento_da_os "$OS6" id)
-curl -s -X POST "$MP/__admin/mappings" -d '{"priority": 1, "request": {"method": "POST", "urlPath": "/checkout/preferences"},
+curl -s -X POST "$MP/__admin/mappings" -d '{"priority": 1, "request": {"method": "POST", "urlPath": "/v1/orders"},
   "response": {"status": 500}, "metadata": {"teste": "mp-fora"}}' >/dev/null
 confere "Mercado Pago fora na aprovação → 503" \
   "$(http_status -X POST "$API/orcamentos/$ORC6/aprovar" -H "Authorization: Bearer $TOKEN_CLIENTE")" 503
@@ -275,7 +288,10 @@ confere "e o orçamento continua aguardando aprovação" "$(orcamento_da_os "$OS
 sem_resposta "nenhuma resposta publicada"
 curl -s -X POST "$MP/__admin/mappings/remove-by-metadata" -d '{"matchesJsonPath": "$.teste"}' >/dev/null
 
-confere "aviso do Mercado Pago de pagamento desconhecido é ignorado" "$(aviso_mp 123456)" IGNORADO
+confere "aviso de order desconhecida (o simulado do painel) é ignorado" "$(aviso_mp 123456)" IGNORADO
+confere "aviso de outro tópico é ignorado" \
+  "$(curl -s -X POST "$API/webhooks/mercado-pago" -H 'Content-Type: application/json' \
+    -d '{"type": "payment", "data": {"id": "1"}}' | campo resultado)" IGNORADO
 
 echo
 echo "== Resultado: $((VERIFICACOES - FALHAS))/$VERIFICACOES verificações ok"
