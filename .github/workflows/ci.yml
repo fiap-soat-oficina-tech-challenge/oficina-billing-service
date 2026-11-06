@@ -49,8 +49,11 @@ jobs:
         run: npm run test:cov
 
       # Qualidade no CI (sonar-project.properties): envia o código e a cobertura
-      # ao SonarQube Cloud e falha se o quality gate reprovar.
+      # ao SonarQube Cloud e falha se o quality gate reprovar. Roda nos PRs e no
+      # push da main: o plano gratuito só analisa a branch principal (main) e os
+      # PRs, e toda mudança na develop chega por um PR já analisado.
       - name: SonarQube Cloud
+        if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
         uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
