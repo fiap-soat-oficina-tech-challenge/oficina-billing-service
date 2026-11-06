@@ -1,8 +1,11 @@
 # Billing Service
 
+[![Quality Gate](https://sonarcloud.io/api/project_badges/measure?project=fiap-soat-oficina-tech-challenge_oficina-billing-service&metric=alert_status)](https://sonarcloud.io/summary/overall?id=fiap-soat-oficina-tech-challenge_oficina-billing-service&branch=main)
+[![Coverage](https://sonarcloud.io/api/project_badges/measure?project=fiap-soat-oficina-tech-challenge_oficina-billing-service&metric=coverage)](https://sonarcloud.io/summary/overall?id=fiap-soat-oficina-tech-challenge_oficina-billing-service&branch=main)
+
 Orçamentos, aprovação e pagamentos com o Mercado Pago.
 
-Microsserviço do Tech Challenge da Fase 4 (FIAP SOAT). A oficina mecânica foi dividida em três serviços: OS Service, Billing Service e Execution Service. A Saga é orquestrada pelo OS Service. Os contratos de mensagens e rotas entre os serviços estão em [docs/contratos.md](https://github.com/fiap-soat-oficina-tech-challenge/tech-challenge-fiap/blob/develop/docs/contratos.md), e este serviço segue esse documento à risca.
+Microsserviço do Tech Challenge da Fase 4 (FIAP SOAT). A oficina mecânica foi dividida em três serviços: OS Service, Billing Service e Execution Service. A Saga é orquestrada pelo OS Service. Os contratos de mensagens e rotas entre os serviços estão em [docs/contratos.md](https://github.com/fiap-soat-oficina-tech-challenge/tech-challenge-fiap/blob/main/docs/contratos.md), e este serviço segue esse documento à risca. A visão geral da solução (os cinco repositórios, o diagrama da arquitetura, a justificativa da divisão e das tecnologias e a estratégia da Saga) está no [README do OS Service](https://github.com/fiap-soat-oficina-tech-challenge/tech-challenge-fiap#a-solução-na-fase-4).
 
 | Serviço | Repositório | Banco |
 |---|---|---|
@@ -341,7 +344,15 @@ Resultado atual: **230 testes, 97% de linhas** (97,3% de instruções, 85,3% de 
 | Infraestrutura | chamadas ao Mercado Pago (corpo, headers, idempotência, os 409 do cancelamento e do estorno, timeout e novas tentativas), e-mails com o QR Code embutido e o HTML escapado, mapeamento do Prisma |
 | Interface | rotas, QR Code na resposta (imagem PNG), leitura do aviso do Mercado Pago (tópico `order`, no corpo ou na query) e roteamento dos comandos |
 
-O CI (`.github/workflows/ci.yml`) roda lint, testes com cobertura e build em todo PR; o check `Build & Test` é obrigatório para o merge na `main`. No push na `develop` e na `main`, o mesmo CI roda como primeiro estágio do [deploy](#deploy).
+![Cobertura do Billing Service: relatório do Istanbul (Jest)](docs/cobertura.png)
+
+*Relatório do Istanbul (Jest), gerado por `npm run test:cov` em 06/11/2026. O mesmo relatório (lcov) é enviado ao [SonarQube Cloud](https://sonarcloud.io/summary/overall?id=fiap-soat-oficina-tech-challenge_oficina-billing-service&branch=main) pelo CI.*
+
+### Qualidade no CI (SonarQube Cloud)
+
+O CI (`.github/workflows/ci.yml`) roda lint, testes com cobertura, a análise do SonarQube Cloud e o build. O passo do SonarQube envia o código e o relatório de cobertura e espera o quality gate: se ele reprovar, o job `Build & Test` falha. Na `main`, `Build & Test` e `SonarCloud Code Analysis` são checks obrigatórios para o merge.
+
+A análise roda **em todo PR** e **no push da `main`**, e não roda no push da `develop`, porque o plano gratuito do SonarQube Cloud só disponibiliza o resultado da branch principal e dos PRs. Isso não deixa código sem verificação: todo código chega à `develop` e à `main` por um PR, e o mesmo commit acabou de ser analisado no PR que o levou até lá, com o quality gate travando o merge. No push na `develop` e na `main`, o mesmo CI roda como primeiro estágio do [deploy](#deploy).
 
 ## Variáveis de ambiente
 
@@ -365,7 +376,7 @@ O deploy é automático, pelo workflow `.github/workflows/cd.yml`, a cada push n
 
 ```mermaid
 flowchart LR
-    CI["CI<br/>lint · testes (mínimo 80%) · build"]
+    CI["CI<br/>lint · testes (mínimo 80%)<br/>SonarQube (PR e main) · build"]
     AMB{"Ambiente<br/>no ar?"}
     IMG["Imagem<br/>ECR oficina-billing-service"]
     DEP["Deploy no EKS<br/>Secret do SSM · ConfigMap · migração · rollout"]
@@ -380,7 +391,7 @@ flowchart LR
 
 | Estágio | O que faz |
 |---|---|
-| CI | O mesmo workflow dos PRs (`ci.yml`). Se falhar, nada é publicado. |
+| CI | O mesmo workflow dos PRs (`ci.yml`), com lint, testes com cobertura, SonarQube (no push da `main`) e build. Se falhar, nada é publicado. |
 | Ambiente na AWS | O ambiente só existe nas janelas de integração e demonstração. Sem o secret `AWS_ROLE_ARN` ou sem o cluster `tc3-oficina-homolog`, a imagem e o deploy são pulados com um aviso no resumo da execução. Qualquer outro erro falha o pipeline. |
 | Build & Push (ECR) | Imagem `linux/amd64` com duas tags: o commit e a branch. |
 | Deploy (EKS) | Monta o Secret `billing-secret` a partir do SSM, aplica o ConfigMap com o endereço do API Gateway lido do SSM, roda o Job de migração (`prisma migrate deploy`) e só então aplica Deployment, Service, HPA, Ingress e PDB, esperando o rollout. Um deploy por vez. |
@@ -393,7 +404,7 @@ A infraestrutura AWS do serviço (fila, banco, repositório de imagens, parâmet
 ## Fluxo de trabalho
 
 - Branch a partir da `develop` → PR para a `develop` → PR da `develop` para a `main`.
-- A `main` é protegida: exige PR com uma aprovação, o check `Build & Test` verde e a branch atualizada, e vale também para administradores.
+- A `main` é protegida: exige PR com uma aprovação, os checks `Build & Test` e `SonarCloud Code Analysis` verdes e a branch atualizada, e vale também para administradores.
 - Mudança de contrato (mensagem, fila ou rota usada por outro serviço) começa por um PR em `docs/contratos.md` no OS Service, e só depois é feita nos serviços.
 - Mudança na base comum (`src/common/`, `src/core/`, `auth`, `health`) é feita nos três serviços.
 
