@@ -7,11 +7,15 @@ Orçamentos, aprovação e pagamentos com o Mercado Pago.
 
 Microsserviço do Tech Challenge da Fase 4 (FIAP SOAT). A oficina mecânica foi dividida em três serviços: OS Service, Billing Service e Execution Service. A Saga é orquestrada pelo OS Service. Os contratos de mensagens e rotas entre os serviços estão em [docs/contratos.md](https://github.com/fiap-soat-oficina-tech-challenge/tech-challenge-fiap/blob/main/docs/contratos.md), e este serviço segue esse documento à risca. A visão geral da solução (os cinco repositórios, o diagrama da arquitetura, a justificativa da divisão e das tecnologias e a estratégia da Saga) está no [README do OS Service](https://github.com/fiap-soat-oficina-tech-challenge/tech-challenge-fiap#a-solução-na-fase-4).
 
-| Serviço | Repositório | Banco |
+A solução tem cinco repositórios: os três microsserviços, cada um com o próprio banco e a própria infraestrutura (pasta `terraform/`), e dois de plataforma na AWS, compartilhados por eles.
+
+| Repositório | Papel | Banco |
 |---|---|---|
-| OS Service (orquestrador da Saga) | [fiap-soat-oficina-tech-challenge/tech-challenge-fiap](https://github.com/fiap-soat-oficina-tech-challenge/tech-challenge-fiap) | PostgreSQL |
-| Billing Service | [oficina-billing-service](https://github.com/fiap-soat-oficina-tech-challenge/oficina-billing-service) | PostgreSQL |
-| Execution Service | [oficina-execution-service](https://github.com/fiap-soat-oficina-tech-challenge/oficina-execution-service) | DynamoDB |
+| [`tech-challenge-fiap`](https://github.com/fiap-soat-oficina-tech-challenge/tech-challenge-fiap) | OS Service e orquestrador da Saga | PostgreSQL (RDS) |
+| **`oficina-billing-service`** (este) | Billing Service: orçamento, aprovação, pagamento no Mercado Pago e estorno | PostgreSQL (RDS) |
+| [`oficina-execution-service`](https://github.com/fiap-soat-oficina-tech-challenge/oficina-execution-service) | Execution Service: fila de diagnóstico e reparo do mecânico | DynamoDB |
+| [`tc3-infra-k8s`](https://github.com/fiap-soat-oficina-tech-challenge/tc3-infra-k8s) | Plataforma na AWS: VPC, cluster EKS, ALB Controller, OIDC do GitHub e observabilidade New Relic; workflow que sobe e derruba o ambiente | — |
+| [`tc3-auth-lambda`](https://github.com/fiap-soat-oficina-tech-challenge/tc3-auth-lambda) | Entrada na AWS: API Gateway, Lambda de autenticação por CPF e Lambda de e-mail | — |
 
 ## Sumário
 
