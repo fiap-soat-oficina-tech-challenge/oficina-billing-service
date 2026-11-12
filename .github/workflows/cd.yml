@@ -1,0 +1,277 @@
+name: CD
+
+# Pipeline do serviço, na ordem: build e testes (o próprio CI, com o mínimo de
+# 80% de cobertura) → imagem no ECR → deploy no EKS → smoke test. Um único
+# ambiente na AWS: develop e main deployam no mesmo cluster, como o OS Service.
+on:
+  push:
+    branches: [main, develop]
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  EKS_CLUSTER: tc3-oficina-homolog
+  ECR_REPOSITORY: oficina-billing-service
+  SSM_PREFIX: /tc3-oficina/homolog
+  NAMESPACE: oficina-billing
+
+jobs:
+  # ─── Stage 1: o CI completo ───────────────────────────────────────────────
+  # Lint, testes com cobertura e build. Um commit com testes quebrados nunca
+  # vira imagem nem deploy.
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+    secrets: inherit
+
+  # ─── Ambiente no ar? ──────────────────────────────────────────────────────
+  # O ambiente da AWS só existe nas janelas de integração e demonstração. Fora
+  # delas, a imagem e o deploy são pulados com um aviso, em vez de falhar a cada
+  # merge. Duas condições, nesta ordem:
+  #   1. o secret AWS_ROLE_ARN existe: o repositório já foi autorizado na role de
+  #      deploy (bootstrap/ de tc3-infra-k8s);
+  #   2. o cluster existe.
+  # Qualquer outro erro (permissão, rede) falha o job: só a ausência do ambiente
+  # vira aviso.
+  ambiente:
+    name: Ambiente na AWS
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      disponivel: ${{ steps.cluster.outputs.disponivel || steps.role.outputs.disponivel }}
+    steps:
+      - name: Role de deploy configurada
+        id: role
+        env:
+          AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+        run: |
+          if [ -n "$AWS_ROLE_ARN" ]; then
+            echo "configurada=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Secret AWS_ROLE_ARN ausente: imagem e deploy pulados"
+            echo "disponivel=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Configure AWS credentials (OIDC)
+        if: steps.role.outputs.configurada == 'true'
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Cluster no ar
+        id: cluster
+        if: steps.role.outputs.configurada == 'true'
+        run: |
+          set -uo pipefail
+          if SAIDA=$(aws eks describe-cluster --name "$EKS_CLUSTER" --query cluster.status --output text 2>&1); then
+            echo "cluster $EKS_CLUSTER: $SAIDA"
+            echo "disponivel=true" >> "$GITHUB_OUTPUT"
+          elif echo "$SAIDA" | grep -q ResourceNotFoundException; then
+            echo "::warning::Cluster $EKS_CLUSTER não existe (ambiente derrubado): imagem e deploy pulados"
+            echo "disponivel=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "$SAIDA"
+            exit 1
+          fi
+
+  # ─── Stage 2: imagem no ECR ───────────────────────────────────────────────
+  build:
+    name: Build & Push (ECR)
+    runs-on: ubuntu-latest
+    needs: [ci, ambiente]
+    if: needs.ambiente.outputs.disponivel == 'true'
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      image: ${{ steps.meta.outputs.image_sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
+
+      - name: Compute image references
+        id: meta
+        run: |
+          REG="${{ steps.ecr.outputs.registry }}"
+          echo "image_sha=${REG}/${ECR_REPOSITORY}:${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          echo "image_branch=${REG}/${ECR_REPOSITORY}:${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      # Runner amd64 → build nativo linux/amd64 (os nós do EKS são x86).
+      - name: Build and push image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          tags: |
+            ${{ steps.meta.outputs.image_sha }}
+            ${{ steps.meta.outputs.image_branch }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ─── Stage 3: deploy no EKS ───────────────────────────────────────────────
+  deploy:
+    name: Deploy (EKS)
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: read
+      id-token: write
+    # Rótulo do deploy no GitHub: main = production, develop = homolog. O
+    # ambiente físico na AWS é o mesmo.
+    environment: ${{ github.ref_name == 'main' && 'production' || 'homolog' }}
+    # As duas branches miram o mesmo cluster: um deploy por vez, sem cancelar o
+    # que está em andamento.
+    concurrency:
+      group: deploy-billing
+      cancel-in-progress: false
+    env:
+      IMAGE: ${{ needs.build.outputs.image }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.1.0
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --region "$AWS_REGION" --name "$EKS_CLUSTER"
+
+      - name: Namespace
+        run: kubectl apply -f k8s/00-namespace.yaml
+
+      # Secret montado do SSM (lista e origem em terraform/README.md). Valores
+      # mascarados nos logs; o YAML vai pelo pipe, sem ser impresso.
+      - name: Sync billing-secret from SSM
+        run: |
+          set -euo pipefail
+          ler() { aws ssm get-parameter --name "${SSM_PREFIX}/$1" --with-decryption --query Parameter.Value --output text; }
+          DB_URL=$(ler billing/DATABASE_URL)
+          JWT=$(ler JWT_SECRET)
+          WEBHOOK_TOKEN=$(ler billing/WEBHOOK_ORCAMENTO_TOKEN)
+          MP_TOKEN=$(ler billing/MERCADO_PAGO_ACCESS_TOKEN)
+          MAIL_TOKEN=$(ler MAIL_API_TOKEN)
+          # Falha tolerada: sem a chave o agente só não reporta.
+          NR_KEY=$(ler NEW_RELIC_LICENSE_KEY 2>/dev/null || echo "")
+          for valor in "$DB_URL" "$JWT" "$WEBHOOK_TOKEN" "$MP_TOKEN" "$MAIL_TOKEN"; do
+            echo "::add-mask::$valor"
+          done
+          if [ -n "$NR_KEY" ]; then
+            echo "::add-mask::$NR_KEY"
+          else
+            echo "::warning::NEW_RELIC_LICENSE_KEY ausente no SSM — o serviço sobe sem APM"
+          fi
+          # O `prisma migrate deploy` precisa do sslmode na string; o serviço o
+          # troca pela validação com a CA do RDS (PrismaService).
+          case "$DB_URL" in *sslmode=*) : ;; *) DB_URL="${DB_URL}&sslmode=require";; esac
+          kubectl create secret generic billing-secret -n "$NAMESPACE" \
+            --from-literal=DATABASE_URL="$DB_URL" \
+            --from-literal=JWT_SECRET="$JWT" \
+            --from-literal=WEBHOOK_ORCAMENTO_TOKEN="$WEBHOOK_TOKEN" \
+            --from-literal=MERCADO_PAGO_ACCESS_TOKEN="$MP_TOKEN" \
+            --from-literal=MAIL_LAMBDA_TOKEN="$MAIL_TOKEN" \
+            --from-literal=NEW_RELIC_LICENSE_KEY="$NR_KEY" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      # O endereço do API Gateway muda quando a plataforma é recriada: vem do
+      # SSM, publicado pela stack tc3-auth-lambda.
+      - name: ConfigMap
+        run: |
+          set -euo pipefail
+          API_URL=$(aws ssm get-parameter --name "${SSM_PREFIX}/API_GATEWAY_URL" --query Parameter.Value --output text)
+          sed "s|API_GATEWAY_URL_PLACEHOLDER|${API_URL}|g" k8s/app/01-configmap.yaml | kubectl apply -f -
+
+      - name: Run database migrations (Job)
+        run: |
+          set -euo pipefail
+          kubectl delete job billing-db-migration -n "$NAMESPACE" --ignore-not-found
+          sed "s|IMAGE_PLACEHOLDER|${IMAGE}|g" k8s/app/02-migration-job.yaml | kubectl apply -f -
+          if ! kubectl wait --for=condition=complete job/billing-db-migration -n "$NAMESPACE" --timeout=180s; then
+            echo "::error::Migration não completou"
+            kubectl logs -n "$NAMESPACE" job/billing-db-migration --tail=120 || true
+            exit 1
+          fi
+          kubectl logs -n "$NAMESPACE" job/billing-db-migration --tail=40 || true
+
+      - name: Deploy application
+        run: |
+          set -euo pipefail
+          sed "s|IMAGE_PLACEHOLDER|${IMAGE}|g" k8s/app/03-deployment.yaml | kubectl apply -f -
+          kubectl apply -f k8s/app/04-service.yaml
+          kubectl apply -f k8s/app/05-hpa.yaml
+          kubectl apply -f k8s/app/06-ingress.yaml
+          kubectl apply -f k8s/app/07-pdb.yaml
+          kubectl rollout status deployment/oficina-billing -n "$NAMESPACE" --timeout=180s
+
+      - name: Diagnose on failure
+        if: failure()
+        run: |
+          kubectl get all -n "$NAMESPACE" -o wide || true
+          kubectl get events -n "$NAMESPACE" --sort-by=.lastTimestamp | tail -40 || true
+          kubectl describe pods -n "$NAMESPACE" || true
+          for pod in $(kubectl get pods -n "$NAMESPACE" -l app=oficina-billing -o name); do
+            echo "--- logs $pod ---"; kubectl logs "$pod" -n "$NAMESPACE" --tail=200 --all-containers=true || true
+            echo "--- previous $pod ---"; kubectl logs "$pod" -n "$NAMESPACE" --tail=200 --all-containers=true --previous || true
+          done
+
+      # Confere o que o deploy pode quebrar sem mexer em dados: o serviço
+      # responde, alcança o banco, exige autenticação e tem o token do webhook.
+      # O fluxo com os outros serviços é coberto pelo smoke test do OS Service.
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          kubectl port-forward -n "$NAMESPACE" svc/oficina-billing 3000:3000 >/tmp/pf.log 2>&1 &
+          PF_PID=$!
+          trap 'kill $PF_PID 2>/dev/null' EXIT
+          API=http://localhost:3000/billing
+
+          echo "=== 1. Aguarda /billing/health ==="
+          for i in $(seq 1 30); do
+            curl -sf "$API/health" >/dev/null && { echo "pronto após ${i}s"; break; }
+            [ "$i" = 30 ] && { echo "serviço não respondeu em 30s"; exit 1; }
+            sleep 1
+          done
+
+          echo "=== 2. Readiness com o banco ==="
+          curl -sf "$API/health/ready" | jq -e '.status == "ok" and .database == "up"' >/dev/null
+          echo "PostgreSQL OK"
+
+          echo "=== 3. Rotas protegidas (401) ==="
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" "$API/orcamentos?osId=00000000-0000-4000-8000-000000000000")
+          [ "$CODE" = "401" ] || { echo "sem JWT: esperado 401, veio $CODE"; exit 1; }
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API/webhooks/orcamento" \
+            -H "Content-Type: application/json" -H "x-webhook-token: token-errado" -d '{}')
+          [ "$CODE" = "401" ] || { echo "token do webhook errado: esperado 401, veio $CODE"; exit 1; }
+          echo "JWT e token do webhook OK"
+
+          echo "=== 4. HPA e réplicas ==="
+          kubectl get hpa oficina-billing-hpa -n "$NAMESPACE" >/dev/null
+          AVAIL=$(kubectl get deployment/oficina-billing -n "$NAMESPACE" -o jsonpath='{.status.availableReplicas}')
+          [ "${AVAIL:-0}" -ge 2 ] || { echo "esperado ao menos 2 réplicas, veio ${AVAIL:-0}"; exit 1; }
+          echo "HPA OK, $AVAIL réplicas servindo"
+
+          echo "=== Smoke test OK ==="

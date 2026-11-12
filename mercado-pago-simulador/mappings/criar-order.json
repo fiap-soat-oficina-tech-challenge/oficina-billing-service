@@ -1,0 +1,26 @@
+{
+  "request": { "method": "POST", "urlPath": "/v1/orders" },
+  "response": {
+    "status": 201,
+    "headers": { "Content-Type": "application/json" },
+    "jsonBody": {
+      "id": "ORD-{{jsonPath request.body '$.external_reference'}}",
+      "type": "qr",
+      "status": "created",
+      "status_detail": "created",
+      "external_reference": "{{jsonPath request.body '$.external_reference'}}",
+      "total_amount": "{{jsonPath request.body '$.total_amount'}}",
+      "expiration_time": "{{jsonPath request.body '$.expiration_time'}}",
+      "config": {
+        "qr": {
+          "external_pos_id": "{{jsonPath request.body '$.config.qr.external_pos_id'}}",
+          "mode": "{{jsonPath request.body '$.config.qr.mode'}}"
+        }
+      },
+      "type_response": {
+        "qr_data": "00020101021243650016COM.MERCADOLIBRE0201306SIMULADOR-{{jsonPath request.body '$.external_reference'}}5204000053039865802BR5925OFICINA SOAT6009SAO PAULO63040000"
+      }
+    },
+    "transformers": ["response-template"]
+  }
+}

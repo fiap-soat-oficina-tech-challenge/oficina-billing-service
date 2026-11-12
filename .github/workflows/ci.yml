@@ -1,0 +1,62 @@
+name: CI
+
+# Nos PRs, este workflow é o check obrigatório `Build & Test`. No push em
+# develop/main quem o roda é o CD (cd.yml), como primeiro estágio antes da
+# imagem e do deploy: cada commit é testado uma vez só.
+on:
+  pull_request:
+    branches: [main, develop]
+  workflow_call:
+
+# Chamado pelo CD, `github.workflow` seria o nome do CD; o grupo usa um nome
+# fixo para não colidir com os grupos do workflow que o chama.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # Histórico completo: o SonarQube Cloud usa o git para saber o que é
+          # código novo no PR.
+          fetch-depth: 0
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "24"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      # O cliente do Prisma é gerado do schema (src/generated fica fora do git).
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: Lint
+        run: npm run lint:check
+
+      # Falha se a cobertura de linhas ou de instruções ficar abaixo de 80%
+      # (coverageThreshold no package.json).
+      - name: Unit tests with coverage
+        run: npm run test:cov
+
+      # Qualidade no CI (sonar-project.properties): envia o código e a cobertura
+      # ao SonarQube Cloud e falha se o quality gate reprovar. Roda nos PRs e no
+      # push da main: o plano gratuito só analisa a branch principal (main) e os
+      # PRs, e toda mudança na develop chega por um PR já analisado.
+      - name: SonarQube Cloud
+        if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+        uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+      - name: Compile TypeScript
+        run: npm run build
